@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import pg from "pg";
 
 test("operator connects, browses metadata, filters, and signs out", async ({
   page,
@@ -35,7 +36,7 @@ test("operator connects, browses metadata, filters, and signs out", async ({
   await expect(
     page.getByRole("cell", { name: "parent_id", exact: true }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Constraints", exact: true }).click();
+  await page.getByRole("button", { name: "Keys", exact: true }).click();
   await expect(
     page.getByRole("cell", { name: "Foreign key", exact: true }),
   ).toBeVisible();
@@ -70,4 +71,133 @@ test("operator connects, browses metadata, filters, and signs out", async ({
   await page.getByRole("button", { name: "Sign out", exact: false }).click();
   await expect(page.getByLabel("Workspace password")).toBeVisible();
   expect(errors).toEqual([]);
+});
+
+test("snapshot refresh, logical keys, preview, scheduling and table history work in the browser", async ({
+  page,
+}) => {
+  const database =
+    process.env.TEST_DATABASE_URL ||
+    "postgresql://metadata:integration-password@127.0.0.1:55432/metadata";
+  const admin = new pg.Client({ connectionString: database });
+  await admin.connect();
+  const schema =
+    "browser_" + Date.now() + "_long_schema_name_for_mobile_layout";
+  let id;
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  try {
+    await admin.query(`CREATE SCHEMA ${schema}; CREATE TABLE ${schema}.items(id integer PRIMARY KEY,note text);
+      INSERT INTO ${schema}.items VALUES(1,'Preview example');`);
+    await page.request.post("/api/login", {
+      data: { password: "integration-password" },
+    });
+    const parsed = new URL(database);
+    const created = await page.request.post("/api/connections", {
+      data: {
+        name: schema,
+        host: parsed.hostname,
+        port: Number(parsed.port),
+        database: parsed.pathname.slice(1),
+        username: parsed.username,
+        password: parsed.password,
+        sslMode: "disable",
+      },
+    });
+    const body = await created.json();
+    expect(created.status()).toBe(201);
+    id = body.id;
+    await expect
+      .poll(async () => {
+        const jobs = await page.request.get(`/api/connections/${id}/jobs`);
+        return (await jobs.json()).find((j) => j.id === body.job.id).status;
+      })
+      .toBe("succeeded");
+    await page.goto("/");
+    await page.locator(`[data-connect="${id}"]`).click();
+    await page.locator(`[data-schema="${schema}"]`).click();
+    await page
+      .getByRole("cell", { name: "items", exact: false })
+      .first()
+      .click();
+    await page.getByRole("button", { name: "Keys", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Define logical primary key" })
+      .click();
+    await page.getByLabel("Key name", { exact: true }).fill("business_key");
+    await page.getByRole("dialog").getByLabel("id", { exact: true }).check();
+    await page
+      .getByRole("button", { name: "Save logical key", exact: true })
+      .click();
+    await expect(
+      page.getByRole("cell", { name: "business_key", exact: true }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "Data preview", exact: true })
+      .click();
+    await expect(
+      page.getByRole("cell", { name: "Preview example", exact: true }),
+    ).toBeVisible();
+    await page.getByLabel("Auto-refresh interval").fill("5");
+    await page.getByRole("button", { name: "Save schedule" }).click();
+    await expect(page.getByRole("status").first()).toContainText(
+      "every 5 minutes",
+    );
+    await admin.query(
+      `ALTER TABLE ${schema}.items ADD COLUMN fresh_column integer DEFAULT 7`,
+    );
+    await page
+      .getByRole("button", { name: "Refresh metadata", exact: false })
+      .click();
+    await expect(page.getByRole("status").first()).toContainText(
+      "Refresh complete",
+    );
+    await expect(
+      page.getByRole("cell", { name: "fresh_column", exact: true }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "Change history", exact: true })
+      .click();
+    await expect(page.locator("#content")).toContainText("fresh_column");
+    await expect(page.locator("#content")).toContainText("business_key");
+    await expect(page.locator("#content")).toContainText("added");
+    await page.screenshot({
+      path: "test-results/table-history.png",
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "Back", exact: false }).click();
+    await page
+      .getByRole("button", { name: "Refresh jobs", exact: true })
+      .click();
+    await expect(page.locator("#content")).toContainText("succeeded");
+    for (const width of [320, 390, 768]) {
+      await page.setViewportSize({ width, height: 844 });
+      await expect
+        .poll(
+          () =>
+            page.evaluate(
+              (expectedWidth) =>
+                innerWidth === expectedWidth &&
+                document.documentElement.scrollWidth <= expectedWidth,
+              width,
+            ),
+          {
+            message: `Refresh jobs must fit a ${width}px viewport with a long schema name`,
+          },
+        )
+        .toBe(true);
+      await expect(
+        page.getByRole("heading", { name: schema, exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Refresh metadata", exact: false }),
+      ).toBeVisible();
+    }
+    expect(errors).toEqual([]);
+  } finally {
+    if (id)
+      await admin.query("DELETE FROM metadata_connections WHERE id=$1", [id]);
+    await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+    await admin.end();
+  }
 });
