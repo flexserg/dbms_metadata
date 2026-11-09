@@ -312,6 +312,8 @@ h2 {
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
+  white-space: nowrap;
 }
 .connection-row .delete {
   flex: 0;
@@ -332,6 +334,8 @@ h2 {
   padding: 9px 10px 9px 34px;
   font-size: 12px;
   border-radius: 5px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .schema-button.active {
   color: #19766d;
@@ -381,11 +385,22 @@ main {
 .breadcrumb span:last-child {
   color: #617380;
 }
+.breadcrumb span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .page-heading {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 25px;
+}
+.page-heading > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.page-heading > button {
+  flex-shrink: 0;
 }
 .page-heading .muted {
   font-size: 13px;
@@ -546,6 +561,10 @@ footer {
 footer > span:last-child {
   font-weight: 600;
   color: #778d8b;
+}
+footer > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .empty {
   text-align: center;

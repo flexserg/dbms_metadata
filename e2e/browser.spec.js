@@ -81,7 +81,8 @@ test("snapshot refresh, logical keys, preview, scheduling and table history work
     "postgresql://metadata:integration-password@127.0.0.1:55432/metadata";
   const admin = new pg.Client({ connectionString: database });
   await admin.connect();
-  const schema = "browser_" + Date.now();
+  const schema =
+    "browser_" + Date.now() + "_long_schema_name_for_mobile_layout";
   let id;
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
@@ -169,12 +170,29 @@ test("snapshot refresh, logical keys, preview, scheduling and table history work
       .getByRole("button", { name: "Refresh jobs", exact: true })
       .click();
     await expect(page.locator("#content")).toContainText("succeeded");
-    await page.setViewportSize({ width: 390, height: 844 });
-    expect(
-      await page.evaluate(
-        () => document.documentElement.scrollWidth <= innerWidth,
-      ),
-    ).toBe(true);
+    for (const width of [320, 390, 768]) {
+      await page.setViewportSize({ width, height: 844 });
+      await expect
+        .poll(
+          () =>
+            page.evaluate(
+              (expectedWidth) =>
+                innerWidth === expectedWidth &&
+                document.documentElement.scrollWidth <= expectedWidth,
+              width,
+            ),
+          {
+            message: `Refresh jobs must fit a ${width}px viewport with a long schema name`,
+          },
+        )
+        .toBe(true);
+      await expect(
+        page.getByRole("heading", { name: schema, exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Refresh metadata", exact: false }),
+      ).toBeVisible();
+    }
     expect(errors).toEqual([]);
   } finally {
     if (id)
