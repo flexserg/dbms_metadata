@@ -1,0 +1,30 @@
+name: Validate
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_DB: metadata
+          POSTGRES_USER: metadata
+          POSTGRES_PASSWORD: integration-password
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U metadata -d metadata"
+          --health-interval 5s --health-timeout 3s --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:integration
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test
+      - run: docker build -t dbms-metadata:test .
