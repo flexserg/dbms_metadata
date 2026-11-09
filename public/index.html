@@ -68,9 +68,27 @@
                 A clear view of your database structure.
               </p>
             </div>
-            <button id="refresh" class="secondary">↻ Refresh</button>
+            <button id="refresh" class="secondary">↻ Refresh metadata</button>
           </div>
           <div id="notice" role="status" hidden></div>
+          <div class="snapshot-bar" id="snapshot-bar" hidden>
+            <span id="snapshot-info"></span>
+            <form id="schedule-form">
+              <label
+                >Auto-refresh (minutes)
+                <input
+                  id="refresh-interval"
+                  type="number"
+                  min="0"
+                  max="10080"
+                  value="0"
+                  required
+                  aria-label="Auto-refresh interval"
+                /> </label
+              ><button class="secondary" type="submit">Save schedule</button
+              ><small>0 = manual</small>
+            </form>
+          </div>
           <div id="summary" class="stats"></div>
           <section class="content-card">
             <div class="card-toolbar">
@@ -162,6 +180,37 @@
           <button type="button" id="test-connection" class="secondary">
             Test connection</button
           ><button type="submit" class="primary">Save connection →</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="logical-key-dialog">
+      <form id="logical-key-form">
+        <div class="dialog-heading">
+          <h2>Logical primary key</h2>
+          <button
+            type="button"
+            id="close-key-dialog"
+            class="icon-button"
+            aria-label="Close logical key"
+          >
+            ×
+          </button>
+        </div>
+        <p class="muted">
+          Defined in this platform. The source database is unchanged. Uniqueness
+          is not enforced or verified.
+        </p>
+        <label
+          >Key name<input id="logical-key-name" required maxlength="255"
+        /></label>
+        <fieldset id="logical-key-columns">
+          <legend>Key attributes</legend>
+        </fieldset>
+        <p id="logical-key-feedback" role="status"></p>
+        <div class="dialog-actions">
+          <button type="button" id="remove-logical-key" class="secondary">
+            Remove logical key</button
+          ><button type="submit" class="primary">Save logical key</button>
         </div>
       </form>
     </dialog>
