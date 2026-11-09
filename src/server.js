@@ -34,7 +34,18 @@ export async function createApp(config = process.env) {
   const app = express();
   app.disable("x-powered-by");
   if (config.TRUST_PROXY === "1") app.set("trust proxy", 1);
-  app.use(helmet());
+  const secureCookies = config.COOKIE_SECURE !== "false";
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          // HTTP deployments must load assets using their original scheme.
+          "upgrade-insecure-requests": secureCookies ? [] : null,
+        },
+      },
+      strictTransportSecurity: secureCookies ? undefined : false,
+    }),
+  );
   app.use(express.json({ limit: "16kb" }));
   app.get("/health/live", (_req, res) => res.json({ status: "ok" }));
   app.get("/health/ready", async (_req, res) => {
@@ -66,7 +77,7 @@ export async function createApp(config = process.env) {
   const cookieOptions = {
     httpOnly: true,
     sameSite: "strict",
-    secure: config.COOKIE_SECURE !== "false",
+    secure: secureCookies,
     path: "/",
     maxAge: 8 * 3600_000,
   };
@@ -195,13 +206,11 @@ export async function createApp(config = process.env) {
       42501: "Database user does not have permission for this metadata.",
       57014: "Metadata request timed out.",
     };
-    res
-      .status(error.type === "entity.parse.failed" ? 400 : 502)
-      .json({
-        error:
-          messages[error.code] ||
-          "Request failed. Check database connectivity, TLS configuration, and server logs.",
-      });
+    res.status(error.type === "entity.parse.failed" ? 400 : 502).json({
+      error:
+        messages[error.code] ||
+        "Request failed. Check database connectivity, TLS configuration, and server logs.",
+    });
   });
   return { app, pool };
 }

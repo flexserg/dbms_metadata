@@ -63,17 +63,19 @@ The deployment trusts one reverse proxy and requires HTTPS cookies. Expose the a
 
 ## Configuration and access
 
-| Variable      | Purpose                                                               |
-| ------------- | --------------------------------------------------------------------- |
-| DATABASE_URL  | Required application storage PostgreSQL URL                           |
-| APP_KEY       | Required 32-byte encryption/signing key, encoded as 64 hex characters |
-| APP_PASSWORD  | Required shared workspace password, minimum 12 characters             |
-| PORT          | HTTP port; default 3000                                               |
-| COOKIE_SECURE | Default true; false only for local HTTP                               |
-| TRUST_PROXY   | Set 1 only behind a trusted single reverse proxy                      |
-| PG_TARGET_CA  | Optional PEM CA certificate for private target database CAs           |
+| Variable      | Purpose                                                                                                                     |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| DATABASE_URL  | Required application storage PostgreSQL URL                                                                                 |
+| APP_KEY       | Required 32-byte encryption/signing key, encoded as 64 hex characters                                                       |
+| APP_PASSWORD  | Required shared workspace password, minimum 12 characters                                                                   |
+| PORT          | HTTP port; default 3000                                                                                                     |
+| COOKIE_SECURE | Default true; false enables HTTP cookies and disables forced HTTPS asset upgrades / HSTS; use only on trusted HTTP networks |
+| TRUST_PROXY   | Set 1 only behind a trusted single reverse proxy                                                                            |
+| PG_TARGET_CA  | Optional PEM CA certificate for private target database CAs                                                                 |
 
 Target TLS supports verified certificates/hostnames or explicitly disabled TLS for trusted networks. Storage TLS uses node-postgres connection URL options. `/health/live` checks the process; `/health/ready` checks storage, not every saved target.
+
+For a trusted HTTP-only k3s deployment, set the app Deployment's `COOKIE_SECURE` value to `"false"`. This allows the browser to load scripts over HTTP and retain the login cookie. Keep the default `"true"` when using HTTPS. After changing the Deployment, wait for its rollout and reload the page. This option does not configure TLS on the server.
 
 All signed-in operators share access to all saved connections. Use an organizational access gateway and cluster egress policies to constrain target networks. Connection passwords use AES-256-GCM. Session cookies are HttpOnly, SameSite=Strict, and last eight hours. Password rotation invalidates existing sessions; logout removes the browser cookie but copied tokens remain valid until expiration or rotation. Login throttling is per app process. Profiles can be removed and recreated when their settings change.
 

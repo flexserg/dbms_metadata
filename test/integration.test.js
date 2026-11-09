@@ -5,6 +5,59 @@ import { createApp } from "../src/server.js";
 import { withTarget } from "../src/metadata.js";
 
 test(
+  "explicit HTTP mode permits scripts and session cookies while HTTPS remains the default",
+  { skip: !process.env.INTEGRATION },
+  async () => {
+    for (const mode of ["false", "true", undefined]) {
+      const config = {
+        DATABASE_URL:
+          process.env.TEST_DATABASE_URL ||
+          "postgresql://metadata:integration-password@127.0.0.1:55432/metadata",
+        APP_PASSWORD: "integration-password",
+        APP_KEY: "ab".repeat(32),
+        COOKIE_SECURE: mode,
+      };
+      const { app, pool } = await createApp(config);
+      const server = app.listen(0, "127.0.0.1");
+      await new Promise((resolve) => server.once("listening", resolve));
+      const url = `http://127.0.0.1:${server.address().port}`;
+      try {
+        const page = await fetch(url);
+        assert.equal(page.status, 200);
+        const csp = page.headers.get("content-security-policy");
+        assert.match(csp, /script-src 'self'/);
+        assert.equal(
+          csp.includes("upgrade-insecure-requests"),
+          mode !== "false",
+        );
+        assert.equal(
+          page.headers.has("strict-transport-security"),
+          mode !== "false",
+        );
+        assert.equal((await fetch(url + "/app.js")).status, 200);
+        const login = await fetch(url + "/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: config.APP_PASSWORD }),
+        });
+        assert.equal(login.status, 200);
+        const cookie = login.headers.get("set-cookie");
+        assert.equal(/; Secure(?:;|$)/.test(cookie), mode !== "false");
+        if (mode === "false") {
+          const session = await fetch(url + "/api/session", {
+            headers: { cookie: cookie.split(";")[0] },
+          });
+          assert.equal(session.status, 200);
+        }
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+        await pool.end();
+      }
+    }
+  },
+);
+
+test(
   "PostgreSQL-backed API authenticates, persists encrypted connections and reads real metadata",
   { skip: !process.env.INTEGRATION },
   async () => {
