@@ -19,8 +19,6 @@ const state = {
   previewLoading: false,
   previewError: null,
   previewOffset: 0,
-  types: [],
-  typeDefinitions: [],
   typeExpanded: new Set(),
   expandedObjects: new Set(),
   expandedPartitions: new Set(),
@@ -308,11 +306,7 @@ function render() {
         "Default / identity",
         "Comment",
       ],
-      columnRows(
-        filtered(d.columns),
-        d.types || state.typeDefinitions,
-        `column/${d.id}`,
-      ),
+      columnRows(filtered(d.columns), d.types || [], `column/${d.id}`),
     );
   else if (state.tab === "Constraints")
     $("#content").innerHTML = table(
@@ -414,8 +408,6 @@ async function loadConnection(id, preferred = {}) {
   state.previewLoading = false;
   state.previewError = null;
   state.typeExpanded.clear();
-  state.types = [];
-  state.typeDefinitions = [];
   $("#refresh-interval").value =
     state.connection?.refresh_interval_minutes || 0;
   notice("");
@@ -488,8 +480,6 @@ async function loadSchema(name) {
   state.tab = "Objects";
   state.objects = [];
   state.routines = [];
-  state.types = [];
-  state.typeDefinitions = [];
   state.expandedObjects.clear();
   $("#search").value = "";
   render();
@@ -497,16 +487,13 @@ async function loadSchema(name) {
   $("#content").innerHTML = '<div class="loading">Reading schema…</div>';
   try {
     const base = `/connections/${state.connection.id}`;
-    const [objects, routines, types] = await Promise.all([
+    const [objects, routines] = await Promise.all([
       api(`${base}/objects?schema=${encodeURIComponent(name)}`),
       api(`${base}/routines?schema=${encodeURIComponent(name)}`),
-      api(`${base}/types?schema=${encodeURIComponent(name)}`),
     ]);
     if (generation !== state.generation) return;
     state.objects = objects;
     state.routines = routines;
-    state.types = types.types;
-    state.typeDefinitions = types.definitions;
     notice("");
     render();
   } catch (e) {

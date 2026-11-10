@@ -4,6 +4,11 @@ import pg from "pg";
 import { createApp } from "../src/server.js";
 import { withTarget } from "../src/metadata.js";
 import { randomUUID } from "node:crypto";
+import {
+  readSnapshot,
+  writeSnapshot,
+  initializeStorage,
+} from "../src/relational.js";
 
 test(
   "explicit HTTP mode permits scripts and session cookies while HTTPS remains the default",
@@ -54,6 +59,38 @@ test(
         await new Promise((resolve) => server.close(resolve));
         await pool.end();
       }
+    }
+  },
+);
+
+test(
+  "legacy JSONB storage is rejected without changing its data",
+  { skip: !process.env.INTEGRATION },
+  async () => {
+    const database =
+      process.env.TEST_DATABASE_URL ||
+      "postgresql://metadata:integration-password@127.0.0.1:55432/metadata";
+    const admin = new pg.Client({ connectionString: database });
+    await admin.connect();
+    const schema = "legacy_" + randomUUID().replaceAll("-", "");
+    const pool = new pg.Pool({
+      connectionString: database,
+      options: "-c search_path=" + schema,
+    });
+    try {
+      await admin.query(
+        `CREATE SCHEMA ${schema};CREATE TABLE ${schema}.metadata_snapshots(payload jsonb);INSERT INTO ${schema}.metadata_snapshots VALUES('{}')`,
+      );
+      await assert.rejects(initializeStorage(pool), /clean database/);
+      assert.deepEqual(
+        (await admin.query(`SELECT payload FROM ${schema}.metadata_snapshots`))
+          .rows,
+        [{ payload: {} }],
+      );
+    } finally {
+      await pool.end();
+      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+      await admin.end();
     }
   },
 );
@@ -388,6 +425,62 @@ test(
         d.columns.find((c) => c.name === "id").position,
         d.columns.find((c) => c.name === "parent_id").position,
       ];
+      const jsonColumns = (
+        await pool.query(
+          `SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name LIKE 'metadata_%' AND data_type='jsonb' ORDER BY table_name,column_name`,
+        )
+      ).rows;
+      assert.deepEqual(jsonColumns, [
+        { table_name: "metadata_changes", column_name: "new_value" },
+        { table_name: "metadata_changes", column_name: "previous_value" },
+      ]);
+      const typedColumn = (
+        await pool.query(
+          `SELECT c.name,c.formatted_type,t.name AS type_name FROM metadata_columns c JOIN metadata_types t ON t.connection_id=c.connection_id AND t.id=c.type_id WHERE c.connection_id=$1 AND c.table_id=$2 AND c.name='message'`,
+          [id, item.id],
+        )
+      ).rows[0];
+      assert.equal(typedColumn.type_name, "text");
+      const header = (await req(route("snapshot"))).data;
+      const count = (
+        await pool.query(
+          "SELECT count(*)::int AS n FROM metadata_changes WHERE connection_id=$1",
+          [id],
+        )
+      ).rows[0].n;
+      const transaction = await pool.connect();
+      try {
+        await transaction.query("BEGIN");
+        const invalid = await readSnapshot(transaction, id);
+        invalid.relations.find((r) => r.id === item.id).columns[0].type_id =
+          "4294967294";
+        await transaction.query(
+          `INSERT INTO metadata_changes(job_id,connection_id,entity_type,entity_id,entity_name,table_ids,operation,field) VALUES($1,$2,'column','rollback-test','rollback-test','{}','modified','type')`,
+          [header.job_id, id],
+        );
+        await writeSnapshot(transaction, id, header.job_id, invalid);
+        await assert.rejects(
+          transaction.query("COMMIT"),
+          (e) => e.code === "23503",
+        );
+      } finally {
+        await transaction.query("ROLLBACK");
+        transaction.release();
+      }
+      assert.deepEqual((await req(route("snapshot"))).data, header);
+      assert.equal(
+        (
+          await pool.query(
+            "SELECT count(*)::int AS n FROM metadata_changes WHERE connection_id=$1",
+            [id],
+          )
+        ).rows[0].n,
+        count,
+      );
+      assert.equal(
+        (await req(route("detail") + "?oid=" + item.id)).data.columns[0].type,
+        "integer",
+      );
       assert.equal(
         (
           await req(route("logical-key") + "?oid=" + item.id, "PUT", {

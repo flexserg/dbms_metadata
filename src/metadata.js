@@ -66,13 +66,17 @@ export async function overview(client) {
       WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','p','v','m','f')) AS objects`)
   ).rows[0];
 }
-export async function schemas(client) {
+export async function schemas(client, includeSystem = false) {
   return (
-    await client.query(`SELECT n.oid::text AS id, n.nspname AS name, pg_get_userbyid(n.nspowner) AS owner,
-    obj_description(n.oid,'pg_namespace') AS comment, count(c.oid)::int AS objects
+    await client.query(
+      `SELECT n.oid::text AS id, n.nspname AS name, pg_get_userbyid(n.nspowner) AS owner,
+    obj_description(n.oid,'pg_namespace') AS comment, count(c.oid)::int AS objects,
+    (n.nspname LIKE 'pg_%' OR n.nspname='information_schema') AS is_system
     FROM pg_namespace n LEFT JOIN pg_class c ON c.relnamespace=n.oid AND c.relkind IN ('r','p','v','m','f')
-    WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
-    GROUP BY n.oid ORDER BY n.nspname`)
+    WHERE ($1 OR (n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'))
+    GROUP BY n.oid ORDER BY n.nspname`,
+      [includeSystem],
+    )
   ).rows;
 }
 export async function objects(client, schema) {
@@ -201,8 +205,7 @@ export async function types(client) {
     NULLIF(t.typelem,0)::text AS element_type_id,NULLIF(t.typbasetype,0)::text AS base_type_id,
     obj_description(t.oid,'pg_type') AS comment
     FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace LEFT JOIN pg_class c ON c.oid=t.typrelid
-    WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname<>'information_schema'
-      AND (t.typtype IN ('c','d') OR t.typelem<>0) ORDER BY n.nspname,t.typname`)
+    ORDER BY n.nspname,t.typname`)
   ).rows;
   const fields = (
     await client.query(`SELECT t.oid::text AS owner_type_id,a.attnum AS position,a.attname AS name,
@@ -211,7 +214,7 @@ export async function types(client) {
     col_description(a.attrelid,a.attnum) AS comment
     FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace JOIN pg_attribute a ON a.attrelid=t.typrelid
     LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
-    WHERE t.typtype='c' AND n.nspname NOT LIKE 'pg_%' AND n.nspname<>'information_schema'
+    WHERE t.typtype='c'
       AND a.attnum>0 AND NOT a.attisdropped ORDER BY t.oid,a.attnum`)
   ).rows;
   const byId = new Map(nodes.map((t) => [t.id, { ...t, attributes: [] }]));
@@ -223,12 +226,13 @@ export async function types(client) {
 export async function capture(client) {
   const result = {
     overview: await overview(client),
-    schemas: await schemas(client),
+    schemas: await schemas(client, true),
     relations: [],
     routines: [],
     types: await types(client),
   };
   for (const schema of result.schemas) {
+    if (schema.is_system) continue;
     for (const object of await objects(client, schema.name)) {
       result.relations.push({
         ...object,
