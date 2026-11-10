@@ -10,7 +10,9 @@ import {
   overview,
   preview,
 } from "./metadata.js";
-import { migrateSnapshots, snapshotService } from "./snapshots.js";
+import { snapshotService } from "./snapshots.js";
+import { readResource, initializeStorage } from "./relational.js";
+import { historyScope, historyFilter } from "./history.js";
 
 export async function createApp(config = process.env) {
   const crypto = vault(config.APP_KEY);
@@ -29,7 +31,12 @@ export async function createApp(config = process.env) {
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text NOT NULL, host text NOT NULL, port integer NOT NULL,
     database text NOT NULL, username text NOT NULL, ssl_mode text NOT NULL, password_encrypted text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now())`);
-  await migrateSnapshots(pool);
+  try {
+    await initializeStorage(pool);
+  } catch (e) {
+    await pool.end();
+    throw e;
+  }
   const snapshots = snapshotService(pool, crypto);
   const app = express();
   app.disable("x-powered-by");
@@ -117,7 +124,7 @@ export async function createApp(config = process.env) {
     res.json(
       (
         await pool.query(
-          `SELECT c.id,name,host,port,database,username,ssl_mode AS "sslMode",created_at,refresh_interval_minutes,
+          `SELECT c.id,name,host,port,database,c.username,ssl_mode AS "sslMode",created_at,refresh_interval_minutes,history_retention_days,
             s.captured_at AS snapshot_at FROM metadata_connections c LEFT JOIN metadata_snapshots s ON s.connection_id=c.id ORDER BY name`,
         )
       ).rows,
@@ -207,11 +214,38 @@ export async function createApp(config = process.env) {
       ),
     );
   });
+  app.patch("/api/connections/:id/history-settings", async (req, res) => {
+    const days = req.body?.days;
+    if (!Number.isInteger(days) || days < 0 || days > 36500)
+      return res.status(400).json({
+        error: "Retention must be 0 (keep indefinitely) or 1–36500 days",
+      });
+    await pool.query(
+      "UPDATE metadata_connections SET history_retention_days=$2 WHERE id=$1",
+      [req.profile.id, days],
+    );
+    res.json({ days });
+  });
+  app.delete("/api/connections/:id/history", async (req, res) => {
+    const oid = req.body?.oid || null,
+      before = req.body?.before || null;
+    if (
+      (oid && !/^\d{1,10}$/.test(oid)) ||
+      (before && !Number.isFinite(Date.parse(before)))
+    )
+      return res.status(400).json({ error: "Invalid table or cutoff date" });
+    const result = await pool.query(
+      `${historyScope} DELETE FROM metadata_changes c USING metadata_refresh_jobs j
+      WHERE c.job_id=j.id AND ${historyFilter} AND ($3::timestamptz IS NULL OR COALESCE(j.finished_at,j.started_at)<$3)`,
+      [req.profile.id, oid, before],
+    );
+    res.json({ deleted: result.rowCount });
+  });
   app.get("/api/connections/:id/:resource", async (req, res) => {
     const id = req.profile.id,
       resource = req.params.resource;
     if (
-      ["detail", "preview", "history"].includes(resource) &&
+      ["detail", "preview", "history", "history-jobs"].includes(resource) &&
       req.query.oid !== undefined &&
       !/^\d{1,10}$/.test(String(req.query.oid))
     )
@@ -225,19 +259,41 @@ export async function createApp(config = process.env) {
       ).rows;
       return res.json(jobs);
     }
+    if (resource === "history-jobs") {
+      if (req.query.before && !/^\d+$/.test(req.query.before))
+        return res.status(400).json({ error: "Invalid cursor" });
+      const rows = (
+        await pool.query(
+          `${historyScope} SELECT j.id,j.started_at,j.finished_at,j.trigger,count(*)::int AS change_count,max(c.id)::text AS cursor
+        FROM metadata_changes c JOIN metadata_refresh_jobs j ON j.id=c.job_id WHERE ${historyFilter}
+        GROUP BY j.id HAVING ($3::bigint IS NULL OR max(c.id)<$3) ORDER BY max(c.id) DESC LIMIT 21`,
+          [id, req.query.oid || null, req.query.before || null],
+        )
+      ).rows;
+      const more = rows.length > 20;
+      rows.splice(20);
+      return res.json({ jobs: rows, next: more ? rows.at(-1).cursor : null });
+    }
     if (resource === "history") {
       const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
       if (
         !Number.isInteger(limit) ||
-        (req.query.before && !/^\d+$/.test(req.query.before))
+        (req.query.before && !/^\d+$/.test(req.query.before)) ||
+        (req.query.job && !/^[a-f0-9-]{36}$/i.test(req.query.job))
       )
         return res.status(400).json({ error: "Invalid history pagination" });
       const rows = (
         await pool.query(
-          `SELECT c.*,j.started_at,j.finished_at,j.trigger FROM metadata_changes c JOIN metadata_refresh_jobs j ON j.id=c.job_id
-        WHERE c.connection_id=$1 AND ($2::text IS NULL OR $2=ANY(c.table_ids)) AND ($3::bigint IS NULL OR c.id<$3)
+          `${historyScope} SELECT c.*,j.started_at,j.finished_at,j.trigger FROM metadata_changes c JOIN metadata_refresh_jobs j ON j.id=c.job_id
+        WHERE ${historyFilter} AND ($3::bigint IS NULL OR c.id<$3) AND ($5::uuid IS NULL OR c.job_id=$5)
         ORDER BY c.id DESC LIMIT $4`,
-          [id, req.query.oid || null, req.query.before || null, limit + 1],
+          [
+            id,
+            req.query.oid || null,
+            req.query.before || null,
+            limit + 1,
+            req.query.job || null,
+          ],
         )
       ).rows;
       const more = rows.length > limit;
@@ -269,53 +325,12 @@ export async function createApp(config = process.env) {
         ? res.json(data)
         : res.status(404).json({ error: "Source relation no longer exists" });
     }
-    const saved = (
-      await pool.query(
-        "SELECT captured_at,job_id,payload FROM metadata_snapshots WHERE connection_id=$1",
-        [id],
-      )
-    ).rows[0];
-    if (!saved)
-      return res.status(409).json({
-        error:
-          "No saved snapshot yet. Run Refresh metadata to capture the source.",
-      });
-    const s = saved.payload;
-    if (resource === "snapshot")
-      return res.json({ captured_at: saved.captured_at, job_id: saved.job_id });
-    const data =
-      resource === "overview"
-        ? s.overview
-        : resource === "schemas"
-          ? s.schemas
-          : resource === "objects"
-            ? s.relations
-                .filter(
-                  (r) => r.schema === String(req.query.schema || "public"),
-                )
-                .map(
-                  ({
-                    columns,
-                    constraints,
-                    indexes,
-                    partitions,
-                    logical_keys,
-                    definition,
-                    ...r
-                  }) => r,
-                )
-            : resource === "routines"
-              ? s.routines.filter(
-                  (r) => r.schema === String(req.query.schema || "public"),
-                )
-              : resource === "detail"
-                ? s.relations.find((r) => r.id === String(req.query.oid))
-                : undefined;
-    if (!data)
-      return res
-        .status(404)
-        .json({ error: "Object or resource not found in latest snapshot" });
-    res.json(data);
+    res.json(
+      await readResource(pool, id, resource, {
+        schema: String(req.query.schema || "public"),
+        oid: req.query.oid,
+      }),
+    );
   });
   app.use(express.static(fileURLToPath(new URL("../public", import.meta.url))));
   app.use((error, _req, res, _next) => {

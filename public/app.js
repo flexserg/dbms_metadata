@@ -13,7 +13,15 @@ const state = {
   snapshot: null,
   jobs: [],
   history: { changes: [], next: null },
+  historyPages: new Map(),
+  historyOpen: new Set(),
   preview: null,
+  previewLoading: false,
+  previewError: null,
+  previewOffset: 0,
+  typeExpanded: new Set(),
+  expandedObjects: new Set(),
+  expandedPartitions: new Set(),
 };
 const esc = (value) =>
   String(value ?? "—").replace(
@@ -68,6 +76,72 @@ function table(
 function stat(label, value, note) {
   return `<div class="stat"><div class="stat-label">${esc(label)}</div><div class="stat-value">${esc(value)}</div><div class="stat-note">${esc(note)}</div></div>`;
 }
+const indent = (depth) =>
+  '<span class="tree-indent" aria-hidden="true"></span>'.repeat(depth);
+function hierarchy(rows, expanded, query = "") {
+  const byId = new Map(rows.map((r) => [r.id, r])),
+    children = new Map();
+  for (const r of rows) {
+    if (!children.has(r.parent_id)) children.set(r.parent_id, []);
+    children.get(r.parent_id).push(r);
+  }
+  const matches = (r, seen = new Set()) => {
+    if (seen.has(r.id)) return false;
+    seen.add(r.id);
+    return (
+      JSON.stringify(r).toLowerCase().includes(query) ||
+      (children.get(r.id) || []).some((c) => matches(c, seen))
+    );
+  };
+  const result = [],
+    seen = new Set();
+  function visit(r, depth) {
+    if (seen.has(r.id) || (query && !matches(r))) return;
+    seen.add(r.id);
+    const nested = children.get(r.id) || [],
+      open = expanded.has(r.id) || !!query;
+    result.push({ row: r, depth, hasChildren: !!nested.length, open });
+    if (open) for (const child of nested) visit(child, depth + 1);
+  }
+  for (const r of rows) if (!byId.has(r.parent_id)) visit(r, 0);
+  return result;
+}
+function columnRows(columns, definitions, prefix) {
+  const types = new Map(definitions.map((t) => [t.id, t])),
+    rows = [];
+  function composite(id) {
+    const seen = new Set();
+    while (id && !seen.has(id)) {
+      seen.add(id);
+      const t = types.get(id);
+      if (!t) return null;
+      if (t.kind === "c") return t;
+      id = t.base_type_id || t.element_type_id;
+    }
+    return null;
+  }
+  function visit(r, path, depth, ancestors) {
+    const type = composite(r.type_id),
+      cycle = type && ancestors.has(type.id),
+      expandable = !!type?.attributes.length && !cycle;
+    const open = state.typeExpanded.has(path);
+    const toggle = expandable
+      ? `<button class="tree-toggle" data-type-toggle="${esc(path)}" aria-expanded="${open}" aria-label="${open ? "Collapse" : "Expand"} ${esc(r.name)}">${open ? "▾" : "▸"}</button>`
+      : '<span class="tree-spacer"></span>';
+    rows.push(
+      `<tr class="${depth ? "nested-type-row" : ""}"><td>${esc(r.position)}</td><td class="object-name"><span class="tree-label">${indent(depth)}${toggle}${r.primary_key ? '<span class="key">⚿</span>' : ""}${esc(r.name)}</span></td><td class="code">${esc(r.type)}${cycle ? ' <small class="muted">(recursive reference)</small>' : ""}</td><td>${r.nullable == null ? "—" : r.nullable ? "Yes" : "No"}</td><td class="code">${esc(r.identity ? "GENERATED " + (r.identity === "a" ? "ALWAYS" : "BY DEFAULT") + " AS IDENTITY" : r.generated ? `GENERATED ALWAYS AS (${r.default}) ${r.generated === "s" ? "STORED" : "VIRTUAL"}` : r.default)}</td><td>${esc(r.comment)}</td></tr>`,
+    );
+    if (expandable && open) {
+      const seen = new Set(ancestors);
+      seen.add(type.id);
+      for (const a of type.attributes)
+        visit(a, `${path}/${a.position}`, depth + 1, seen);
+    }
+  }
+  for (const c of columns)
+    visit(c, `${prefix}/${c.position ?? c.type_id}`, 0, new Set());
+  return rows;
+}
 function navigator() {
   $("#connections").innerHTML = state.connections.length
     ? state.connections
@@ -81,6 +155,14 @@ function navigator() {
 function render() {
   navigator();
   const d = state.detail;
+  $("#content").classList.toggle(
+    "preview-content",
+    state.tab === "Data preview",
+  );
+  $("#content").setAttribute(
+    "aria-busy",
+    String(state.tab === "Data preview" && state.previewLoading),
+  );
   $("#snapshot-bar").hidden = !state.connection;
   $("#snapshot-info").textContent = state.snapshot
     ? `Saved snapshot · ${new Date(state.snapshot.captured_at).toLocaleString()} · Browse offline`
@@ -147,23 +229,15 @@ function render() {
     );
   if (state.tab === "Change history") {
     $("#content").innerHTML =
-      '<div class="detail-banner">Changes recorded at refresh time. Baseline capture has no change entries. Related incoming foreign keys and partition-family objects are included.</div>' +
-      table(
-        [
-          "Time / job",
-          "Object",
-          "Change",
-          "Field",
-          "Previous value",
-          "New value",
-        ],
-        filtered(state.history.changes).map(
-          (r) =>
-            `<tr><td>${esc(new Date(r.finished_at || r.started_at).toLocaleString())}<br><small>${esc(r.trigger)} · ${esc(r.job_id.slice(0, 8))}</small></td><td>${esc(r.entity_type)}<br><span class="object-name">${esc(r.entity_name)}</span></td><td>${esc(r.operation)}</td><td>${esc(r.field)}</td><td><pre class="history-value">${esc(JSON.stringify(r.previous_value, null, 2))}</pre></td><td><pre class="history-value">${esc(JSON.stringify(r.new_value, null, 2))}</pre></td></tr>`,
-        ),
-        "No changes recorded",
-        "The first capture establishes a baseline. Later refreshes record observed differences.",
-      ) +
+      `<div class="detail-banner history-toolbar"><span>${d ? "Selected table and its descendants" : "All connection changes"} · Expand a job to load changes</span><button class="secondary" data-history-settings="true">History settings</button></div>` +
+      (state.history.jobs?.length
+        ? filtered(state.history.jobs)
+            .map(
+              (job) =>
+                `<details class="history-job" data-history-job="${job.id}" ${state.historyOpen.has(job.id) ? "open" : ""}><summary>${esc(new Date(job.finished_at || job.started_at).toLocaleString())} · ${esc(job.trigger)} · ${job.change_count} changes <small>${job.id.slice(0, 8)}</small></summary>${historyJobContent(job.id)}</details>`,
+            )
+            .join("")
+        : '<div class="empty">No retained changes. The first capture establishes a baseline.</div>') +
       (state.history.next
         ? '<button class="secondary pager" data-more-history="true">Load older changes</button>'
         : "");
@@ -181,13 +255,23 @@ function render() {
   }
   if (state.tab === "Data preview") {
     const p = state.preview;
+    if (state.previewLoading) {
+      $("#content").innerHTML =
+        '<div class="preview-loading" role="status"><span class="preview-spinner" aria-hidden="true"></span>Retrieving data from source…</div>';
+      return;
+    }
+    if (state.previewError) {
+      $("#content").innerHTML =
+        `<div class="preview-error" role="alert">${esc(state.previewError)} <button class="secondary" data-preview-offset="${state.previewOffset}">Retry data preview</button></div>`;
+      return;
+    }
     $("#content").innerHTML = p
       ? '<div class="detail-banner">Live source data · Up to 50 rows per page · Row order is not guaranteed · Values may be truncated. Preview data is never stored.</div>' +
         table(
           p.columns,
           p.rows.map(
             (row) =>
-              `<tr>${row.map((v) => `<td class="code">${v === null ? '<span class="muted">NULL</span>' : esc(v)}</td>`).join("")}</tr>`,
+              `<tr>${row.map((v) => `<td class="code" title="${esc(v)}">${v === null ? '<span class="muted">NULL</span>' : esc(v)}</td>`).join("")}</tr>`,
           ),
           "No rows returned",
           "The source returned no visible rows at this offset.",
@@ -199,9 +283,9 @@ function render() {
   if (!d && state.tab === "Objects")
     $("#content").innerHTML = table(
       ["Object name", "Type", "Owner", "Est. rows", "Description"],
-      filtered(state.objects).map(
-        (r) =>
-          `<tr class="clickable" tabindex="0" data-object="${r.id}"><td class="object-name"><span class="object-glyph">▦</span>${esc(r.name)}</td><td><span class="type-pill">${esc(r.kind)}</span></td><td>${esc(r.owner)}</td><td class="code">${Number(r.estimated_rows) < 0 ? "—" : esc(r.estimated_rows)}</td><td>${esc(r.comment)}</td></tr>`,
+      hierarchy(state.objects, state.expandedObjects, query).map(
+        ({ row: r, depth, hasChildren, open }) =>
+          `<tr class="clickable" tabindex="0" data-object="${r.id}"><td class="object-name"><span class="tree-label">${indent(depth)}${hasChildren ? `<button class="tree-toggle" data-object-toggle="${r.id}" aria-expanded="${open}" aria-label="${open ? "Collapse" : "Expand"} table ${esc(r.name)}">${open ? "▾" : "▸"}</button>` : '<span class="tree-spacer"></span>'}<span class="object-glyph">▦</span>${esc(r.name)}</span></td><td><span class="type-pill">${esc(r.kind)}</span></td><td>${esc(r.owner)}</td><td class="code">${Number(r.estimated_rows) < 0 ? "—" : esc(r.estimated_rows)}</td><td>${esc(r.comment)}</td></tr>`,
       ),
     );
   else if (!d)
@@ -222,10 +306,7 @@ function render() {
         "Default / identity",
         "Comment",
       ],
-      filtered(d.columns).map(
-        (r) =>
-          `<tr><td>${r.position}</td><td class="object-name">${r.primary_key ? '<span class="key">⚿</span>' : ""}${esc(r.name)}</td><td class="code">${esc(r.type)}</td><td>${r.nullable ? "Yes" : "No"}</td><td class="code">${esc(r.identity ? "GENERATED " + (r.identity === "a" ? "ALWAYS" : "BY DEFAULT") + " AS IDENTITY" : r.generated ? `GENERATED ALWAYS AS (${r.default}) ${r.generated === "s" ? "STORED" : "VIRTUAL"}` : r.default)}</td><td>${esc(r.comment)}</td></tr>`,
-      ),
+      columnRows(filtered(d.columns), d.types || [], `column/${d.id}`),
     );
   else if (state.tab === "Constraints")
     $("#content").innerHTML = table(
@@ -282,10 +363,17 @@ function render() {
       );
   else if (state.tab === "Partitions")
     $("#content").innerHTML = table(
-      ["Name", "Parent", "Level", "Method", "Partition key", "Bounds"],
-      filtered(d.partitions).map(
-        (r) =>
-          `<tr><td class="object-name">${esc(r.schema)}.${esc(r.name)}</td><td>${esc(r.parent)}</td><td>${r.level}</td><td>${esc(r.method)}</td><td class="code">${esc(r.partition_key)}</td><td class="code">${esc(r.bounds)}</td></tr>`,
+      [
+        "Name",
+        "Parent",
+        "Level",
+        "Own partition method",
+        "Own partition key",
+        "Bounds in parent",
+      ],
+      hierarchy(d.partitions, state.expandedPartitions, query).map(
+        ({ row: r, depth, hasChildren, open }) =>
+          `<tr><td class="object-name"><span class="tree-label">${indent(depth)}${hasChildren ? `<button class="tree-toggle" data-partition-toggle="${r.id}" aria-expanded="${open}" aria-label="${open ? "Collapse" : "Expand"} partition ${esc(r.name)}">${open ? "▾" : "▸"}</button>` : '<span class="tree-spacer"></span>'}${esc(r.schema)}.${esc(r.name)}</span></td><td>${esc(r.parent)}</td><td>${r.level}</td><td>${esc(r.method)}</td><td class="code">${esc(r.partition_key)}</td><td class="code" title="${esc(r.parent_method)} · ${esc(r.parent_partition_key)}">${esc(r.bounds)}</td></tr>`,
       ),
     );
   else $("#content").innerHTML = `<pre>${esc(d.definition)}</pre>`;
@@ -317,6 +405,9 @@ async function loadConnection(id, preferred = {}) {
   state.jobs = [];
   state.history = { changes: [], next: null };
   state.preview = null;
+  state.previewLoading = false;
+  state.previewError = null;
+  state.typeExpanded.clear();
   $("#refresh-interval").value =
     state.connection?.refresh_interval_minutes || 0;
   notice("");
@@ -371,6 +462,7 @@ async function loadConnection(id, preferred = {}) {
       );
       if (revision !== state.generation) return;
       state.detail = detail;
+      state.expandedPartitions = new Set([detail.id]);
       state.tab = "Columns";
       render();
     }
@@ -388,6 +480,7 @@ async function loadSchema(name) {
   state.tab = "Objects";
   state.objects = [];
   state.routines = [];
+  state.expandedObjects.clear();
   $("#search").value = "";
   render();
   if (!name) return;
@@ -528,14 +621,16 @@ async function loadTab(tab, more = false, offset = 0) {
     generation = ++state.generation;
   const base = `/connections/${id}`;
   if (tab === "Change history") {
+    if (!more) {
+      state.historyPages.clear();
+      state.historyOpen.clear();
+    }
     const page = await api(
-      `${base}/history?${oid ? "oid=" + oid + "&" : ""}${more ? "before=" + state.history.next : ""}`,
+      `${base}/history-jobs?${oid ? "oid=" + oid + "&" : ""}${more ? "before=" + state.history.next : ""}`,
     );
     if (generation !== state.generation) return;
     state.history = {
-      changes: more
-        ? [...state.history.changes, ...page.changes]
-        : page.changes,
+      jobs: more ? [...state.history.jobs, ...page.jobs] : page.jobs,
       next: page.next,
     };
   } else if (tab === "Refresh jobs") {
@@ -543,13 +638,134 @@ async function loadTab(tab, more = false, offset = 0) {
     if (generation !== state.generation) return;
     state.jobs = jobs;
   } else if (tab === "Data preview") {
-    const data = await api(`${base}/preview?oid=${oid}&offset=${offset}`);
-    if (generation !== state.generation) return;
-    state.preview = data;
+    state.tab = tab;
+    state.previewLoading = true;
+    state.previewError = null;
+    state.previewOffset = offset;
+    state.preview = null;
+    render();
+    try {
+      const data = await api(`${base}/preview?oid=${oid}&offset=${offset}`);
+      if (generation !== state.generation) return;
+      state.preview = data;
+    } catch (e) {
+      if (generation !== state.generation) return;
+      state.previewError = e.message;
+    }
+    state.previewLoading = false;
+    render();
+    return;
   }
   state.tab = tab;
   render();
 }
+function historyJobContent(id) {
+  const p = state.historyPages.get(id);
+  if (!p || p.loading)
+    return '<div class="history-loading" role="status">Loading changes…</div>';
+  if (p.error)
+    return `<div class="history-loading" role="alert">${esc(p.error)}</div>`;
+  return (
+    table(
+      ["Object", "Change", "Field", "Previous value", "New value"],
+      p.changes.map(
+        (r) =>
+          `<tr><td>${esc(r.entity_type)}<br>${esc(r.entity_name)}</td><td>${esc(r.operation)}</td><td>${esc(r.field)}</td><td><pre class="history-value">${esc(JSON.stringify(r.previous_value, null, 2))}</pre></td><td><pre class="history-value">${esc(JSON.stringify(r.new_value, null, 2))}</pre></td></tr>`,
+      ),
+      "No retained changes",
+      "These entries may have been removed by retention.",
+    ) +
+    (p.next
+      ? `<button class="secondary pager" data-more-job="${id}">Load more changes in job</button>`
+      : "")
+  );
+}
+async function loadHistoryJob(id, more = false) {
+  const revision = state.generation,
+    previous = state.historyPages.get(id);
+  state.historyPages.set(id, { ...previous, loading: true });
+  render();
+  try {
+    const p = await api(
+      `/connections/${state.connection.id}/history?job=${id}${state.detail?.id ? "&oid=" + state.detail.id : ""}${more ? "&before=" + previous.next : ""}`,
+    );
+    if (revision !== state.generation) return;
+    state.historyPages.set(id, {
+      changes: more ? [...previous.changes, ...p.changes] : p.changes,
+      next: p.next,
+    });
+  } catch (e) {
+    if (revision !== state.generation) return;
+    state.historyPages.set(id, { error: e.message });
+  }
+  render();
+}
+document.addEventListener(
+  "toggle",
+  (e) => {
+    const el = e.target;
+    if (
+      !el.matches("details[data-history-job]") ||
+      state.tab !== "Change history"
+    )
+      return;
+    const id = el.dataset.historyJob;
+    if (el.open) {
+      state.historyOpen.add(id);
+      if (!state.historyPages.has(id)) loadHistoryJob(id);
+    } else state.historyOpen.delete(id);
+  },
+  true,
+);
+function historySettings() {
+  $("#retention-days").value = state.connection.history_retention_days || 0;
+  $("#history-delete-scope").textContent = state.detail
+    ? `Delete history for ${state.detail.schema}.${state.detail.name} and its descendants.`
+    : "Delete history for this entire connection.";
+  $("#history-cutoff").value = "";
+  $("#history-feedback").textContent = "";
+  $("#history-dialog").showModal();
+}
+$("#close-history").onclick = () => $("#history-dialog").close();
+$("#history-form").onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    const days = Number($("#retention-days").value);
+    await api(`/connections/${state.connection.id}/history-settings`, {
+      method: "PATCH",
+      body: { days },
+    });
+    state.connection.history_retention_days = days;
+    $("#history-feedback").textContent = "Retention saved";
+  } catch (e) {
+    $("#history-feedback").textContent = e.message;
+  }
+};
+$("#delete-history").onclick = async () => {
+  if (
+    !confirm(
+      "Permanently delete historical change entries for the displayed scope?",
+    )
+  )
+    return;
+  try {
+    const cutoff = $("#history-cutoff").value;
+    const result = await api(`/connections/${state.connection.id}/history`, {
+      method: "DELETE",
+      body: {
+        oid: state.detail?.id || null,
+        before: cutoff ? new Date(cutoff).toISOString() : null,
+      },
+    });
+    state.historyPages.clear();
+    state.historyOpen.clear();
+    await loadTab("Change history");
+    $("#history-feedback").textContent =
+      `Deleted ${result.deleted} change entries`;
+  } catch (e) {
+    $("#history-feedback").textContent = e.message;
+  }
+};
 function editKey() {
   const d = state.detail,
     k = d.logical_keys[0];
@@ -570,6 +786,7 @@ async function saveKey(remove = false) {
   const button = $("#logical-key-form button[type=submit]");
   button.disabled = true;
   try {
+    const definitions = state.detail.types;
     state.detail = await api(
       `/connections/${state.connection.id}/logical-key?oid=${state.detail.id}`,
       {
@@ -586,6 +803,7 @@ async function saveKey(remove = false) {
             },
       },
     );
+    state.detail.types = definitions;
     $("#logical-key-dialog").close();
     render();
   } catch (e) {
@@ -601,11 +819,28 @@ $("#logical-key-form").onsubmit = (e) => {
 $("#remove-logical-key").onclick = () => saveKey(true);
 document.addEventListener("click", async (e) => {
   const el = e.target.closest(
-    "[data-connect],[data-delete],[data-schema],[data-tab],[data-object],[data-back],[data-add],[data-routine],[data-edit-key],[data-more-history],[data-preview-offset]",
+    "[data-connect],[data-delete],[data-schema],[data-tab],[data-object],[data-back],[data-add],[data-routine],[data-edit-key],[data-more-history],[data-preview-offset],[data-type-toggle],[data-object-toggle],[data-partition-toggle],[data-history-settings],[data-more-job]",
   );
   if (!el) return;
   try {
-    if ("editKey" in el.dataset) editKey();
+    if ("historySettings" in el.dataset) historySettings();
+    else if ("moreJob" in el.dataset)
+      await loadHistoryJob(el.dataset.moreJob, true);
+    else if (
+      "typeToggle" in el.dataset ||
+      "objectToggle" in el.dataset ||
+      "partitionToggle" in el.dataset
+    ) {
+      const [key, set] =
+        "typeToggle" in el.dataset
+          ? [el.dataset.typeToggle, state.typeExpanded]
+          : "objectToggle" in el.dataset
+            ? [el.dataset.objectToggle, state.expandedObjects]
+            : [el.dataset.partitionToggle, state.expandedPartitions];
+      if (set.has(key)) set.delete(key);
+      else set.add(key);
+      render();
+    } else if ("editKey" in el.dataset) editKey();
     else if ("moreHistory" in el.dataset) await loadTab("Change history", true);
     else if ("previewOffset" in el.dataset)
       await loadTab("Data preview", false, Number(el.dataset.previewOffset));
@@ -640,6 +875,7 @@ document.addEventListener("click", async (e) => {
       );
       if (generation !== state.generation) return;
       state.detail = d;
+      state.expandedPartitions = new Set([d.id]);
       state.tab = "Columns";
       state.preview = null;
       state.history = { changes: [], next: null };

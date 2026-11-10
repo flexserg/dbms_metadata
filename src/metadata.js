@@ -66,13 +66,17 @@ export async function overview(client) {
       WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','p','v','m','f')) AS objects`)
   ).rows[0];
 }
-export async function schemas(client) {
+export async function schemas(client, includeSystem = false) {
   return (
-    await client.query(`SELECT n.oid::text AS id, n.nspname AS name, pg_get_userbyid(n.nspowner) AS owner,
-    obj_description(n.oid,'pg_namespace') AS comment, count(c.oid)::int AS objects
+    await client.query(
+      `SELECT n.oid::text AS id, n.nspname AS name, pg_get_userbyid(n.nspowner) AS owner,
+    obj_description(n.oid,'pg_namespace') AS comment, count(c.oid)::int AS objects,
+    (n.nspname LIKE 'pg_%' OR n.nspname='information_schema') AS is_system
     FROM pg_namespace n LEFT JOIN pg_class c ON c.relnamespace=n.oid AND c.relkind IN ('r','p','v','m','f')
-    WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
-    GROUP BY n.oid ORDER BY n.nspname`)
+    WHERE ($1 OR (n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'))
+    GROUP BY n.oid ORDER BY n.nspname`,
+      [includeSystem],
+    )
   ).rows;
 }
 export async function objects(client, schema) {
@@ -107,6 +111,8 @@ export async function detail(client, oid) {
     await client.query(
       `SELECT c.oid::text AS id, n.nspname AS schema, c.relname AS name, c.relkind,
     pg_get_userbyid(c.relowner) AS owner, obj_description(c.oid,'pg_class') AS comment,
+    (SELECT inhparent::text FROM pg_inherits WHERE inhrelid=c.oid ORDER BY inhseqno LIMIT 1) AS parent_id,
+    ARRAY(SELECT inhparent::text FROM pg_inherits WHERE inhrelid=c.oid ORDER BY inhseqno) AS parent_ids,
     c.reltuples::bigint::text AS estimated_rows,
     CASE WHEN c.relkind IN ('r','p','m') THEN pg_total_relation_size(c.oid)::text ELSE NULL END AS size,
     CASE WHEN c.relkind IN ('v','m') THEN pg_get_viewdef(c.oid,true) ELSE NULL END AS definition
@@ -117,7 +123,7 @@ export async function detail(client, oid) {
   if (!relation) return null;
   const columns = (
     await client.query(
-      `SELECT a.attnum AS position, a.attname AS name,
+      `SELECT a.attnum AS position, a.attname AS name, a.atttypid::text AS type_id,
     format_type(a.atttypid,a.atttypmod) AS type, NOT a.attnotnull AS nullable,
     pg_get_expr(d.adbin,d.adrelid) AS default, col_description(a.attrelid,a.attnum) AS comment,
     a.attidentity AS identity, a.attgenerated AS generated,
@@ -164,13 +170,16 @@ export async function detail(client, oid) {
   const partitions = (
     await client.query(
       `WITH RECURSIVE tree AS (
-      SELECT c.oid, NULL::oid AS parent_id, 0 AS level
-        FROM pg_class c WHERE c.oid=pg_partition_root($1::regclass) AND (c.relkind='p' OR c.relispartition)
+      SELECT c.oid, (SELECT inhparent FROM pg_inherits WHERE inhrelid=c.oid AND c.relispartition LIMIT 1) AS parent_id, 0 AS level
+        FROM pg_class c WHERE c.oid=$1::oid AND (c.relkind='p' OR c.relispartition)
       UNION ALL SELECT i.inhrelid,i.inhparent,t.level+1 FROM tree t JOIN pg_inherits i ON i.inhparent=t.oid
     ) SELECT t.oid::text AS id, n.nspname AS schema, c.relname AS name, t.parent_id::text,
        CASE WHEN p.oid IS NOT NULL THEN quote_ident(pn.nspname)||'.'||quote_ident(p.relname) END AS parent,
-       t.level, CASE COALESCE(pt.partstrat,ppt.partstrat) WHEN 'r' THEN 'RANGE' WHEN 'l' THEN 'LIST' WHEN 'h' THEN 'HASH' END AS method,
-       COALESCE(pg_get_partkeydef(c.oid),pg_get_partkeydef(p.oid)) AS partition_key,
+       t.level, (SELECT count(*)::int-1 FROM pg_partition_ancestors(c.oid)) AS absolute_level,
+       CASE pt.partstrat WHEN 'r' THEN 'RANGE' WHEN 'l' THEN 'LIST' WHEN 'h' THEN 'HASH' END AS method,
+       pg_get_partkeydef(c.oid) AS partition_key,
+       CASE ppt.partstrat WHEN 'r' THEN 'RANGE' WHEN 'l' THEN 'LIST' WHEN 'h' THEN 'HASH' END AS parent_method,
+       pg_get_partkeydef(p.oid) AS parent_partition_key,
        pg_get_expr(c.relpartbound,c.oid,true) AS bounds
        FROM tree t JOIN pg_class c ON c.oid=t.oid JOIN pg_namespace n ON n.oid=c.relnamespace
        LEFT JOIN pg_class p ON p.oid=t.parent_id LEFT JOIN pg_namespace pn ON pn.oid=p.relnamespace
@@ -189,14 +198,41 @@ export async function detail(client, oid) {
   };
 }
 
+export async function types(client) {
+  const nodes = (
+    await client.query(`SELECT t.oid::text AS id,n.nspname AS schema,t.typname AS name,
+    format_type(t.oid,NULL) AS type,t.typtype AS kind,c.relkind AS relation_kind,t.typrelid::text AS relation_id,
+    NULLIF(t.typelem,0)::text AS element_type_id,NULLIF(t.typbasetype,0)::text AS base_type_id,
+    obj_description(t.oid,'pg_type') AS comment
+    FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace LEFT JOIN pg_class c ON c.oid=t.typrelid
+    ORDER BY n.nspname,t.typname`)
+  ).rows;
+  const fields = (
+    await client.query(`SELECT t.oid::text AS owner_type_id,a.attnum AS position,a.attname AS name,
+    a.atttypid::text AS type_id,format_type(a.atttypid,a.atttypmod) AS type,NOT a.attnotnull AS nullable,
+    pg_get_expr(d.adbin,d.adrelid) AS default,a.attidentity AS identity,a.attgenerated AS generated,
+    col_description(a.attrelid,a.attnum) AS comment
+    FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace JOIN pg_attribute a ON a.attrelid=t.typrelid
+    LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+    WHERE t.typtype='c'
+      AND a.attnum>0 AND NOT a.attisdropped ORDER BY t.oid,a.attnum`)
+  ).rows;
+  const byId = new Map(nodes.map((t) => [t.id, { ...t, attributes: [] }]));
+  for (const { owner_type_id, ...field } of fields)
+    byId.get(owner_type_id)?.attributes.push(field);
+  return [...byId.values()];
+}
+
 export async function capture(client) {
   const result = {
     overview: await overview(client),
-    schemas: await schemas(client),
+    schemas: await schemas(client, true),
     relations: [],
     routines: [],
+    types: await types(client),
   };
   for (const schema of result.schemas) {
+    if (schema.is_system) continue;
     for (const object of await objects(client, schema.name)) {
       result.relations.push({
         ...object,

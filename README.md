@@ -1,6 +1,6 @@
 # Atlas · PostgreSQL metadata workspace
 
-A web GUI inspired by DBeaver's database navigator. Node.js serves the interface and API; PostgreSQL stores encrypted connection profiles, the latest complete metadata snapshot per connection, and a history of changes. Browsing uses persisted metadata; only refresh and data preview contact the source.
+A web GUI inspired by DBeaver's database navigator. Node.js serves the interface and API; PostgreSQL stores encrypted connection profiles, the latest complete metadata snapshot in relational tables, and a history of changes. Browsing uses persisted metadata; only refresh and data preview contact the source. This branch requires a clean backing database; legacy snapshots/history are not migrated.
 
 Features: saved/testable connections; schema and relation navigation; columns, generated expressions, primary/foreign/logical keys, constraints, indexes, partitions, view definitions, and function/procedure definitions. Includes manual/scheduled refresh jobs, table change history, filtering, live data preview, owners, estimated row counts, and storage sizes.
 
@@ -34,13 +34,17 @@ The app creates/upgrades its tables at startup; the storage role must own existi
 
 ## Snapshots, refresh jobs, and history
 
-New connections capture an initial baseline automatically. Existing profiles are preserved and capture their first snapshot when opened. Click **Refresh metadata** to enqueue a job and view its result; **Refresh jobs** lists queued, running, succeeded, and failed attempts. An initial baseline has zero change entries because there is no earlier observation.
+New connections capture an initial baseline automatically. Click **Refresh metadata** to enqueue a job and view its result; **Refresh jobs** lists queued, running, succeeded, and failed attempts. An initial baseline has zero change entries because there is no earlier observation.
 
 Set **Auto-refresh (minutes)** and save the schedule: `0` disables scheduling; `1–10080` refreshes periodically. The application checks schedules and durable queued jobs every 30 seconds. No separate CronJob is needed. Database session advisory locks serialize refreshes per connection across app replicas, and duplicate requests reuse an active job. Interrupted running jobs are marked failed after restart when the worker can acquire their released lock; queued jobs resume. Failed attempts do not replace the last successful snapshot and retry automatically at the next scheduled interval, or manually.
 
-Only `metadata_snapshots` contains full snapshots: exactly one JSONB payload per connection, atomically replaced after a successful capture. `metadata_refresh_jobs` stores job status, timestamps, trigger, errors, and change counts; it has no snapshot payload. `metadata_changes` stores only changed object fields with previous/new JSONB values. Additions/removals retain the added/removed object, with the missing side set to null. No-change jobs have zero change rows. Planner row estimates, disk sizes, and schema relation counts are refreshed in the latest payload but excluded from structural history.
+The latest snapshot is stored in typed relational tables with primary keys, foreign keys and ordered attribute tables. `metadata_snapshots` contains only its header and database-level statistics, with one row per connection; there is no `payload` column. Schemas, relations, columns, types/attributes, constraints/columns, indexes/attributes, inheritance, partitions and routines occupy their own tables. See [the relational data model](docs/relational-model.md), with direct SQL examples. Refresh replaces the current rows atomically in one transaction together with the job result and history. It retains no complete older snapshot.
 
-The table **Change history** tab includes the table itself, its columns, keys/constraints, indexes, logical key, related incoming foreign keys, and partition-family metadata. Descendant column/index/constraint changes are also linked to ancestor partitioned tables. History retains dropped objects and follows renames using PostgreSQL OIDs and column positions. Connection-level history can be browsed without selecting a table, including changes for tables that were dropped. Older changes are paginated; job summaries show the latest 100 jobs. Removing a connection deletes its snapshot, jobs, logical-key definitions, and history.
+`metadata_refresh_jobs` stores job status, timestamps, trigger, errors, and change counts. Only `metadata_changes.previous_value` and `new_value` use JSONB to accommodate heterogeneous historical field values. Additions/removals retain the added/removed object, with the missing side set to null. No-change jobs have zero change rows. Planner row estimates, disk sizes, and schema relation counts are refreshed but excluded from structural history. The API still returns JSON assembled from SQL rows; batched inserts also use transient JSON parameters decoded into typed columns, never saved as a snapshot document.
+
+The table **Change history** tab includes only objects owned by the selected table and its descendants, including declarative partitions and ordinary/multiple inheritance. Parent-only changes, sibling tables and incoming foreign keys owned by other tables are excluded. Observed parent/child edges are retained so dropped descendants remain searchable in history. History follows renames using PostgreSQL OIDs and column positions. Connection-level history includes every retained change. History initially displays collapsed job/time groups; expanding a group loads its changes, with pagination inside each job and across job groups. Refresh jobs show the latest 100 status summaries.
+
+Open **History settings** to set retention days per connection: `0` keeps change entries indefinitely; a positive value deletes entries older than that many days during the 30-second worker cycle. The same dialog provides manual deletion for the selected table/subtree or the entire connection, with an optional cutoff date and confirmation. Cleanup deletes change values, while keeping job status summaries and the latest snapshot. Removing a connection deletes all of its application data. Refresh existing connections once after upgrading to collect ordinary-inheritance relationships.
 
 History describes differences observed **between captures**, not every DDL statement. Changes reverted between refreshes are not detectable. Database restore/recreation can change/reuse OIDs; use a new connection/baseline for a replaced source database. The capture covers user schemas, supported relations, columns, constraints, indexes, partition families, and functions/procedures; it is not a full PostgreSQL backup or trigger/privilege audit.
 
@@ -52,13 +56,17 @@ Table tabs:
 | Keys           | Primary and platform logical primary key names/attributes; FK names, ordered attributes, referenced table/attributes, ON DELETE/UPDATE, validation status                |
 | Indexes        | All indexes including constraint indexes, access method, key expressions/attributes, INCLUDE columns, uniqueness, linked constraint, validity/readiness, full definition |
 | Constraints    | UNIQUE/CHECK/EXCLUDE and other catalog constraint types, ordered attributes, condition/definition, validation status, deferrability                                      |
-| Partitions     | Partition name, parent, level, RANGE/LIST/HASH method, key, bounds; includes the root and partition family                                                               |
+| Partitions     | Expandable subtree starting at the selected table (level 0); own RANGE/LIST/HASH method and key, bounds assigned by the parent                                           |
 | Data preview   | Live read-only rows, 50 per UI page; API maximum 100, offset maximum 100000, cell/output truncation                                                                      |
 | Change history | Job/time, object, operation, changed field, previous value, new value                                                                                                    |
 
 **Define logical primary key** on the Keys tab stores one logical key per table in the platform. Select attributes in table column order. This does not create a source constraint or verify/enforce uniqueness. Edits are recorded immediately as `logical-key` jobs and overlaid on later source captures. Removed source columns invalidate the logical key until edited. Only source capture updates the displayed snapshot timestamp.
 
-Data preview is never persisted or added to history. It uses the target role's SELECT permissions and row-level policies. Rows have no guaranteed ordering and concurrent writes can shift page boundaries. Output is limited to 4096 characters per cell and approximately two million characters per response; the source query can still read large underlying values. Views/foreign tables may execute source-side expressions under the read-only transaction.
+Composite columns expand into their attributes on the Columns tab, recursively including nested composites, arrays of composites, and domains over composites. Definitions are stored in `metadata_types` and `metadata_type_attributes` and remain available offline; recursive references are marked instead of expanding forever. Scalar/system types and namespaces are stored to enforce type-reference integrity, but system schemas remain hidden in navigation. Table details load only the type graph reachable from that table's columns. Changes to named composite attributes are linked to the tables using them, including indirect nested references.
+
+Partition parents expand/collapse on both Objects and Partitions tabs. A selected child shows itself and descendants, not ancestors or siblings; its actual parent name is still displayed. **Own partition method/key** describe how that table partitions its children; **Bounds in parent** describe how the parent routes rows into that table. A leaf has bounds but no own method/key. A subpartitioned child can have both bounds and its own, different method/key. Hover over bounds to see the parent's partitioning scheme.
+
+Data preview opens immediately with a loading indicator, shows errors and a retry action in the tab, and ignores late responses after navigation away. Its compact grid, sticky headers and scrolling are styled separately in `public/preview.css`; metadata tables retain their normal spacing. Preview is never persisted or added to history. It uses the target role's SELECT permissions and row-level policies. Rows have no guaranteed ordering and concurrent writes can shift page boundaries. Output is limited to 4096 characters per cell and approximately two million characters per response; the source query can still read large underlying values. Views/foreign tables may execute source-side expressions under the read-only transaction.
 
 Authenticated API endpoints (under `/api/connections/:id`): `POST /refresh` returns HTTP 202 with a job; `GET /jobs`, `/snapshot`, `/history?oid=TABLE_OID&before=CHANGE_ID&limit=100`; `PATCH /schedule` with `{ "minutes": 5 }`; `GET /preview?oid=TABLE_OID&limit=50&offset=0`; `PUT /logical-key?oid=TABLE_OID` with `{ "name": "business_pk", "positions": [1,2] }` or `{ "remove": true }`. Navigation endpoints read the saved snapshot and return 409 until a first capture succeeds.
 
@@ -93,18 +101,28 @@ The deployment trusts one reverse proxy and requires HTTPS cookies. Expose the a
 
 ### Update an existing k3s server without a registry
 
-Back up the application PostgreSQL database and APP_KEY before upgrading. Keep the existing PVC and Secrets. Pull the branch (preserving your local Service/Ingress edits), build and import a **new** tag, and update only the app Deployment:
+This branch uses **storage version 2** and requires a clean database. There is no migration of previous profiles, snapshots or history. Startup refuses an existing JSONB snapshot schema rather than deleting or converting it. A new database can use the same PostgreSQL server/PVC; source databases are unchanged.
+
+Create a new application database, then change `DATABASE_URL` in your private environment/Secret configuration to point to it, using the existing PostgreSQL username/password:
 
 ```sh
-git pull --ff-only origin feat/postgresql-metadata-browser
-docker build -t docker.io/library/dbms-metadata:snapshots-1 .
-docker save docker.io/library/dbms-metadata:snapshots-1 -o /tmp/dbms-metadata-snapshots-1.tar
-sudo k3s ctr -n k8s.io images import /tmp/dbms-metadata-snapshots-1.tar
-kubectl -n dbms-metadata set image deployment/metadata app=docker.io/library/dbms-metadata:snapshots-1
+kubectl -n dbms-metadata exec postgres-0 -- createdb -U metadata metadata_v2
+```
+
+Update the `metadata-secrets` Secret's `DATABASE_URL` to `postgresql://metadata:URL_ENCODED_PASSWORD@postgres:5432/metadata_v2` through your private configuration. Keep the other required keys. Pull this branch (preserving local Service/Ingress edits), build and import a new tag, and update only the app Deployment:
+
+```sh
+git fetch origin
+git switch feat/relational-metadata-storage
+git pull --ff-only
+docker build -t docker.io/library/dbms-metadata:1.2.0 .
+docker save docker.io/library/dbms-metadata:1.2.0 -o /tmp/dbms-metadata-1.2.0.tar
+sudo k3s ctr -n k8s.io images import /tmp/dbms-metadata-1.2.0.tar
+kubectl -n dbms-metadata set image deployment/metadata app=docker.io/library/dbms-metadata:1.2.0
 kubectl -n dbms-metadata rollout status deployment/metadata --timeout=180s
 ```
 
-Keep `imagePullPolicy: Never` and your existing `COOKIE_SECURE=false` setting if serving trusted HTTP. Import the image on every eligible k3s node. Save these choices in your local Deployment YAML. Do not reapply unmodified base manifests over customized Service/Ingress ports. Database migration is automatic at application startup; existing connection profiles and encrypted passwords are retained. Refresh each connection once to establish its baseline; historical changes before that baseline cannot be recovered.
+Keep `imagePullPolicy: Never` and your existing `COOKIE_SECURE=false` setting if serving trusted HTTP. Import the image on every eligible k3s node. Save these choices and the new database URL in your local configuration. Do not reapply unmodified base manifests over customized Service/Ingress ports. Relational tables are initialized automatically at application startup. Add your source connections again and capture their baselines. For local Compose, use a new project/volume or an empty backing database instead of the previous JSONB storage volume.
 
 ## Configuration and access
 

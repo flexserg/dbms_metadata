@@ -4,6 +4,11 @@ import pg from "pg";
 import { createApp } from "../src/server.js";
 import { withTarget } from "../src/metadata.js";
 import { randomUUID } from "node:crypto";
+import {
+  readSnapshot,
+  writeSnapshot,
+  initializeStorage,
+} from "../src/relational.js";
 
 test(
   "explicit HTTP mode permits scripts and session cookies while HTTPS remains the default",
@@ -59,6 +64,38 @@ test(
 );
 
 test(
+  "legacy JSONB storage is rejected without changing its data",
+  { skip: !process.env.INTEGRATION },
+  async () => {
+    const database =
+      process.env.TEST_DATABASE_URL ||
+      "postgresql://metadata:integration-password@127.0.0.1:55432/metadata";
+    const admin = new pg.Client({ connectionString: database });
+    await admin.connect();
+    const schema = "legacy_" + randomUUID().replaceAll("-", "");
+    const pool = new pg.Pool({
+      connectionString: database,
+      options: "-c search_path=" + schema,
+    });
+    try {
+      await admin.query(
+        `CREATE SCHEMA ${schema};CREATE TABLE ${schema}.metadata_snapshots(payload jsonb);INSERT INTO ${schema}.metadata_snapshots VALUES('{}')`,
+      );
+      await assert.rejects(initializeStorage(pool), /clean database/);
+      assert.deepEqual(
+        (await admin.query(`SELECT payload FROM ${schema}.metadata_snapshots`))
+          .rows,
+        [{ payload: {} }],
+      );
+    } finally {
+      await pool.end();
+      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+      await admin.end();
+    }
+  },
+);
+
+test(
   "snapshots replace the baseline atomically; jobs retain only deltas and table history survives offline sources",
   { skip: !process.env.INTEGRATION },
   async () => {
@@ -69,16 +106,26 @@ test(
     const admin = new pg.Client({ connectionString: database });
     await admin.connect();
     await admin.query(`CREATE SCHEMA ${schema};
+    CREATE TYPE ${schema}.geo AS (latitude numeric,longitude numeric);
+    CREATE TYPE ${schema}.address AS (city text,point ${schema}.geo);
+    CREATE TYPE ${schema}.contact AS (home ${schema}.address,previous ${schema}.address[]);
+    CREATE DOMAIN ${schema}.address_domain AS ${schema}.address;
     CREATE TABLE ${schema}.parent(id integer PRIMARY KEY);
+    CREATE TABLE ${schema}.inherit_root(id integer);
+    CREATE TABLE ${schema}.inherit_child(extra integer) INHERITS (${schema}.inherit_root);
+    CREATE TABLE ${schema}.inherit_sibling(other integer) INHERITS (${schema}.inherit_root);
     CREATE TABLE ${schema}.items(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, parent_id integer,
       note text DEFAULT 'old', generated_note text GENERATED ALWAYS AS (upper(note)) STORED,
+      customer ${schema}.contact,domain_address ${schema}.address_domain,
       CONSTRAINT items_fk FOREIGN KEY(parent_id) REFERENCES ${schema}.parent(id) ON DELETE CASCADE ON UPDATE RESTRICT,
       CONSTRAINT items_unique UNIQUE(note), CONSTRAINT items_check CHECK(length(note)>0));
     CREATE INDEX items_partial ON ${schema}.items USING btree(lower(note)) INCLUDE(parent_id) WHERE note IS NOT NULL;
     COMMENT ON COLUMN ${schema}.items.note IS 'Original comment';
     INSERT INTO ${schema}.items(note) VALUES('one'),('two');
     CREATE TABLE ${schema}.events(id integer,month integer) PARTITION BY RANGE(month);
-    CREATE TABLE ${schema}.events_early PARTITION OF ${schema}.events FOR VALUES FROM (1) TO (7);
+    CREATE TABLE ${schema}.events_early PARTITION OF ${schema}.events FOR VALUES FROM (1) TO (7) PARTITION BY HASH(id);
+    CREATE TABLE ${schema}.events_early_0 PARTITION OF ${schema}.events_early FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+    CREATE TABLE ${schema}.events_early_1 PARTITION OF ${schema}.events_early FOR VALUES WITH (MODULUS 2, REMAINDER 1);
     CREATE TABLE ${schema}.events_late PARTITION OF ${schema}.events FOR VALUES FROM (7) TO (13);`);
     const { app, pool, snapshots } = await createApp({
       DATABASE_URL: database,
@@ -141,6 +188,44 @@ test(
         parent = list.find((r) => r.name === "parent"),
         events = list.find((r) => r.name === "events");
       let d = (await req(route("detail") + "?oid=" + item.id)).data;
+      const registry = (await req(route("types") + "?schema=" + schema)).data;
+      assert.ok(
+        registry.types.some(
+          (t) => t.name === "contact" && t.relation_kind === "c",
+        ),
+      );
+      const contact = d.types.find(
+        (t) => t.name === "contact" && t.schema === schema,
+      );
+      const address = d.types.find(
+        (t) => t.name === "address" && t.schema === schema,
+      );
+      const geo = d.types.find((t) => t.name === "geo" && t.schema === schema);
+      assert.equal(
+        d.columns.find((c) => c.name === "customer").type_id,
+        contact.id,
+      );
+      assert.equal(
+        contact.attributes.find((a) => a.name === "home").type_id,
+        address.id,
+      );
+      assert.equal(
+        address.attributes.find((a) => a.name === "point").type_id,
+        geo.id,
+      );
+      assert.equal(
+        d.types.find(
+          (t) =>
+            t.id ===
+            contact.attributes.find((a) => a.name === "previous").type_id,
+        ).element_type_id,
+        address.id,
+      );
+      const domain = d.types.find(
+        (t) =>
+          t.id === d.columns.find((c) => c.name === "domain_address").type_id,
+      );
+      assert.equal(domain.base_type_id, address.id);
       const fk = d.constraints.find((k) => k.type === "f");
       assert.equal(fk.referenced_table, `${schema}.parent`);
       assert.deepEqual(fk.attributes, ["parent_id"]);
@@ -170,17 +255,43 @@ test(
       );
       const parts = (await req(route("detail") + "?oid=" + events.id)).data
         .partitions;
-      assert.equal(parts.length, 3);
+      assert.equal(parts.length, 5);
       assert.ok(
         parts.some(
           (p) =>
             p.name === "events_early" &&
             p.parent_id === events.id &&
             p.level === 1 &&
-            p.method === "RANGE" &&
+            p.method === "HASH" &&
+            p.partition_key === "HASH (id)" &&
+            p.parent_method === "RANGE" &&
             p.bounds.includes("FROM (1)"),
         ),
       );
+      const early = list.find((r) => r.name === "events_early"),
+        leaf = list.find((r) => r.name === "events_early_0");
+      assert.equal(leaf.parent_id, early.id);
+      const subtree = (await req(route("detail") + "?oid=" + early.id)).data
+        .partitions;
+      assert.equal(subtree.length, 3);
+      assert.ok(
+        !subtree.some((p) => p.id === events.id || p.name === "events_late"),
+      );
+      assert.equal(subtree.find((p) => p.id === early.id).level, 0);
+      const leafTree = (await req(route("detail") + "?oid=" + leaf.id)).data
+        .partitions;
+      assert.equal(leafTree.length, 1);
+      assert.equal(leafTree[0].level, 0);
+      assert.equal(leafTree[0].absolute_level, 2);
+      assert.equal(leafTree[0].method, null);
+      assert.equal(leafTree[0].partition_key, null);
+      assert.equal(leafTree[0].parent_method, "HASH");
+      assert.equal(leafTree[0].parent_partition_key, "HASH (id)");
+      assert.match(leafTree[0].bounds, /modulus 2/);
+      const root = parts.find((p) => p.id === events.id);
+      assert.equal(root.method, "RANGE");
+      assert.equal(root.partition_key, "RANGE (month)");
+      assert.equal(root.bounds, null);
       const data = (
         await req(route("preview") + "?oid=" + item.id + "&limit=1")
       ).data;
@@ -194,7 +305,12 @@ test(
       let job = await wait((await req(route("refresh"), "POST", {})).data);
       assert.equal(job.status, "succeeded", job.error);
       assert.equal(job.change_count, 0);
-      await admin.query(`ALTER TABLE ${schema}.items RENAME COLUMN note TO message;
+      await admin.query(`ALTER TYPE ${schema}.geo ADD ATTRIBUTE altitude numeric;
+      COMMENT ON COLUMN ${schema}.events_early_0.id IS 'Leaf attribute changed';
+      COMMENT ON COLUMN ${schema}.inherit_root.id IS 'Root only';
+      COMMENT ON COLUMN ${schema}.inherit_child.extra IS 'Child only';
+      COMMENT ON COLUMN ${schema}.inherit_sibling.other IS 'Sibling only';
+      ALTER TABLE ${schema}.items RENAME COLUMN note TO message;
       ALTER TABLE ${schema}.items ALTER COLUMN message SET DEFAULT 'new';
       COMMENT ON COLUMN ${schema}.items.message IS 'Updated comment';
       ALTER TABLE ${schema}.items ADD COLUMN added_column integer;
@@ -214,6 +330,38 @@ test(
       assert.equal(d.name, "renamed_items");
       assert.ok(d.columns.some((c) => c.name === "message"));
       const history = (await req(route("history") + "?oid=" + item.id)).data;
+      const inheritChild = list.find((r) => r.name === "inherit_child"),
+        inheritRoot = list.find((r) => r.name === "inherit_root");
+      const childHistory = (
+        await req(route("history") + "?oid=" + inheritChild.id)
+      ).data.changes;
+      assert.ok(childHistory.some((c) => c.new_value === "Child only"));
+      assert.ok(
+        !childHistory.some((c) =>
+          ["Root only", "Sibling only"].includes(c.new_value),
+        ),
+      );
+      assert.ok(
+        (
+          await req(route("history") + "?oid=" + inheritRoot.id)
+        ).data.changes.some((c) => c.new_value === "Sibling only"),
+      );
+      assert.ok(
+        history.changes.some(
+          (c) =>
+            c.entity_type === "type_attribute" &&
+            c.operation === "added" &&
+            c.new_value.name === "altitude",
+        ),
+      );
+      assert.ok(
+        (await req(route("history") + "?oid=" + events.id)).data.changes.some(
+          (c) =>
+            c.entity_type === "column" &&
+            c.field === "comment" &&
+            c.new_value === "Leaf attribute changed",
+        ),
+      );
       assert.ok(
         history.changes.some(
           (c) =>
@@ -240,7 +388,7 @@ test(
         ),
       );
       assert.ok(
-        (await req(route("history") + "?oid=" + parent.id)).data.changes.some(
+        !(await req(route("history") + "?oid=" + parent.id)).data.changes.some(
           (c) => c.entity_type === "constraint",
         ),
       );
@@ -277,6 +425,62 @@ test(
         d.columns.find((c) => c.name === "id").position,
         d.columns.find((c) => c.name === "parent_id").position,
       ];
+      const jsonColumns = (
+        await pool.query(
+          `SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name LIKE 'metadata_%' AND data_type='jsonb' ORDER BY table_name,column_name`,
+        )
+      ).rows;
+      assert.deepEqual(jsonColumns, [
+        { table_name: "metadata_changes", column_name: "new_value" },
+        { table_name: "metadata_changes", column_name: "previous_value" },
+      ]);
+      const typedColumn = (
+        await pool.query(
+          `SELECT c.name,c.formatted_type,t.name AS type_name FROM metadata_columns c JOIN metadata_types t ON t.connection_id=c.connection_id AND t.id=c.type_id WHERE c.connection_id=$1 AND c.table_id=$2 AND c.name='message'`,
+          [id, item.id],
+        )
+      ).rows[0];
+      assert.equal(typedColumn.type_name, "text");
+      const header = (await req(route("snapshot"))).data;
+      const count = (
+        await pool.query(
+          "SELECT count(*)::int AS n FROM metadata_changes WHERE connection_id=$1",
+          [id],
+        )
+      ).rows[0].n;
+      const transaction = await pool.connect();
+      try {
+        await transaction.query("BEGIN");
+        const invalid = await readSnapshot(transaction, id);
+        invalid.relations.find((r) => r.id === item.id).columns[0].type_id =
+          "4294967294";
+        await transaction.query(
+          `INSERT INTO metadata_changes(job_id,connection_id,entity_type,entity_id,entity_name,table_ids,operation,field) VALUES($1,$2,'column','rollback-test','rollback-test','{}','modified','type')`,
+          [header.job_id, id],
+        );
+        await writeSnapshot(transaction, id, header.job_id, invalid);
+        await assert.rejects(
+          transaction.query("COMMIT"),
+          (e) => e.code === "23503",
+        );
+      } finally {
+        await transaction.query("ROLLBACK");
+        transaction.release();
+      }
+      assert.deepEqual((await req(route("snapshot"))).data, header);
+      assert.equal(
+        (
+          await pool.query(
+            "SELECT count(*)::int AS n FROM metadata_changes WHERE connection_id=$1",
+            [id],
+          )
+        ).rows[0].n,
+        count,
+      );
+      assert.equal(
+        (await req(route("detail") + "?oid=" + item.id)).data.columns[0].type,
+        "integer",
+      );
       assert.equal(
         (
           await req(route("logical-key") + "?oid=" + item.id, "PUT", {
@@ -372,6 +576,30 @@ test(
       );
       await snapshots.tick();
       assert.equal((await wait(abandoned)).status, "failed");
+      const groups = (await req(route("history-jobs") + "?oid=" + item.id))
+        .data;
+      assert.ok(groups.jobs.length > 0);
+      assert.ok(!Object.hasOwn(groups.jobs[0], "changes"));
+      const grouped = (
+        await req(
+          route("history") + "?job=" + groups.jobs[0].id + "&oid=" + item.id,
+        )
+      ).data;
+      assert.ok(grouped.changes.every((c) => c.job_id === groups.jobs[0].id));
+      await pool.query(
+        "UPDATE metadata_refresh_jobs SET finished_at=now()-interval '10 days' WHERE connection_id=$1 AND change_count>0",
+        [id],
+      );
+      assert.equal(
+        (await req(route("history-settings"), "PATCH", { days: 7 })).status,
+        200,
+      );
+      await snapshots.tick();
+      assert.equal((await req(route("history"))).data.changes.length, 0);
+      assert.equal(
+        (await req(route("detail") + "?oid=" + item.id)).status,
+        200,
+      );
       await admin.query(`DROP TABLE ${schema}.renamed_items`);
       job = await wait((await req(route("refresh"), "POST", {})).data);
       assert.equal(job.status, "succeeded", job.error);
@@ -383,6 +611,12 @@ test(
         (await req(route("history") + "?oid=" + item.id)).data.changes.some(
           (c) => c.entity_type === "table" && c.operation === "removed",
         ),
+      );
+      const deleted = await req(route("history"), "DELETE", { oid: item.id });
+      assert.ok(deleted.data.deleted > 0);
+      assert.equal(
+        (await req(route("history") + "?oid=" + item.id)).data.changes.length,
+        0,
       );
     } finally {
       if (id)
