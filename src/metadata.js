@@ -2,6 +2,9 @@ import pg from "pg";
 
 export function validateConnection(input) {
   const result = {};
+  result.engine = input.engine || "postgres";
+  if (!["postgres", "mssql"].includes(result.engine))
+    throw new Error("Select PostgreSQL or SQL Server");
   for (const field of ["name", "host", "database", "username"]) {
     if (
       typeof input[field] !== "string" ||
@@ -11,10 +14,16 @@ export function validateConnection(input) {
       throw new Error(`A valid ${field} is required`);
     result[field] = input[field].trim();
   }
-  result.port = Number(input.port || 5432);
+  result.port = Number(input.port || (result.engine === "mssql" ? 1433 : 5432));
   if (!Number.isInteger(result.port) || result.port < 1 || result.port > 65535)
     throw new Error("Port must be between 1 and 65535");
-  if (!["disable", "verify-full"].includes(input.sslMode))
+  if (
+    ![
+      "disable",
+      "verify-full",
+      ...(result.engine === "mssql" ? ["trust-server-certificate"] : []),
+    ].includes(input.sslMode)
+  )
     throw new Error("Select a valid TLS mode");
   result.sslMode = input.sslMode;
   result.password = input.password;
@@ -147,7 +156,7 @@ export async function detail(client, oid) {
        CASE k.confdeltype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS on_delete,
        CASE k.confupdtype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS on_update,
        pg_get_expr(k.conbin,k.conrelid,true) AS condition,
-       k.convalidated AS validated, k.condeferrable AS deferrable, k.condeferred AS initially_deferred,
+       k.convalidated AS validated, true AS enabled, k.condeferrable AS deferrable, k.condeferred AS initially_deferred,
        CASE WHEN k.convalidated THEN 'Validated' ELSE 'Not validated' END AS status,
        obj_description(k.oid,'pg_constraint') AS comment
     FROM pg_constraint k WHERE k.conrelid=$1::oid ORDER BY k.conname`,
@@ -195,6 +204,7 @@ export async function detail(client, oid) {
     indexes,
     partitions,
     logical_keys: [],
+    sqlserver_partitions: [],
   };
 }
 

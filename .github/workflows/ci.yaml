@@ -28,3 +28,40 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npx playwright test
       - run: docker build -t dbms-metadata:test .
+  mssql:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_DB: metadata
+          POSTGRES_USER: metadata
+          POSTGRES_PASSWORD: integration-password
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U metadata -d metadata"
+          --health-interval 5s --health-timeout 3s --health-retries 15
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: Metadata_Test_2026!
+          MSSQL_MEMORY_LIMIT_MB: "2048"
+        ports: ["51433:1433"]
+        options: >-
+          --memory=4g
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P Metadata_Test_2026! -C -Q 'SELECT 1' -b"
+          --health-interval 10s --health-timeout 5s --health-retries 30 --health-start-period 20s
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:mssql
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test e2e/mssql.spec.js
+        env:
+          MSSQL_INTEGRATION: "1"

@@ -1,4 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
+const engineLabel = (engine) =>
+  engine === "mssql" ? "SQL Server" : "PostgreSQL";
 const state = {
   connections: [],
   connection: null,
@@ -128,8 +130,20 @@ function columnRows(columns, definitions, prefix) {
     const toggle = expandable
       ? `<button class="tree-toggle" data-type-toggle="${esc(path)}" aria-expanded="${open}" aria-label="${open ? "Collapse" : "Expand"} ${esc(r.name)}">${open ? "▾" : "▸"}</button>`
       : '<span class="tree-spacer"></span>';
+    const defaultValue =
+      r.identity === "mssql"
+        ? `IDENTITY(${r.identity_seed ?? 1}, ${r.identity_increment ?? 1})`
+        : r.generated?.startsWith("mssql")
+          ? `AS (${r.default})${r.generated === "mssql_persisted" ? " PERSISTED" : ""}`
+          : r.identity
+            ? "GENERATED " +
+              (r.identity === "a" ? "ALWAYS" : "BY DEFAULT") +
+              " AS IDENTITY"
+            : r.generated
+              ? `GENERATED ALWAYS AS (${r.default}) ${r.generated === "s" ? "STORED" : "VIRTUAL"}`
+              : r.default;
     rows.push(
-      `<tr class="${depth ? "nested-type-row" : ""}"><td>${esc(r.position)}</td><td class="object-name"><span class="tree-label">${indent(depth)}${toggle}${r.primary_key ? '<span class="key">⚿</span>' : ""}${esc(r.name)}</span></td><td class="code">${esc(r.type)}${cycle ? ' <small class="muted">(recursive reference)</small>' : ""}</td><td>${r.nullable == null ? "—" : r.nullable ? "Yes" : "No"}</td><td class="code">${esc(r.identity ? "GENERATED " + (r.identity === "a" ? "ALWAYS" : "BY DEFAULT") + " AS IDENTITY" : r.generated ? `GENERATED ALWAYS AS (${r.default}) ${r.generated === "s" ? "STORED" : "VIRTUAL"}` : r.default)}</td><td>${esc(r.comment)}</td></tr>`,
+      `<tr class="${depth ? "nested-type-row" : ""}"><td>${esc(r.position)}</td><td class="object-name"><span class="tree-label">${indent(depth)}${toggle}${r.primary_key ? '<span class="key">⚿</span>' : ""}${esc(r.name)}</span></td><td class="code">${esc(r.type)}${cycle ? ' <small class="muted">(recursive reference)</small>' : ""}</td><td>${r.nullable == null ? "—" : r.nullable ? "Yes" : "No"}</td><td class="code">${esc(defaultValue)}</td><td>${esc(r.comment)}</td></tr>`,
     );
     if (expandable && open) {
       const seen = new Set(ancestors);
@@ -155,6 +169,12 @@ function navigator() {
 function render() {
   navigator();
   const d = state.detail;
+  $("#engine-badge").textContent = state.connection
+    ? engineLabel(state.connection.engine)
+    : "Databases";
+  $("#explorer-engine").textContent = state.connection
+    ? engineLabel(state.connection.engine).toUpperCase() + " EXPLORER"
+    : "DATABASE EXPLORER";
   $("#content").classList.toggle(
     "preview-content",
     state.tab === "Data preview",
@@ -183,7 +203,11 @@ function render() {
       stat("Indexes", d.indexes.length, "Access paths") +
       stat("Total size", bytes(d.size), "Including indexes")
     : o
-      ? stat("Database", o.database, `PostgreSQL ${o.version}`) +
+      ? stat(
+          "Database",
+          o.database,
+          `${engineLabel(state.connection.engine)} ${o.version}`,
+        ) +
         stat("Schemas", o.schemas, "User-defined namespaces") +
         stat("Relations", o.objects, "Tables, views & foreign tables") +
         stat("Database size", bytes(o.size), "Total disk usage")
@@ -215,7 +239,7 @@ function render() {
     : "Select a connection to begin";
   if (!state.connection) {
     $("#content").innerHTML =
-      '<div class="empty"><div class="empty-icon">▱</div><h2>A home for your database knowledge</h2><p>Explore schemas, inspect columns, and understand relationships.<br>Connect your first PostgreSQL database to begin.</p><button class="primary" data-add="true">+ Connect a database</button></div>';
+      '<div class="empty"><div class="empty-icon">▱</div><h2>A home for your database knowledge</h2><p>Explore schemas, inspect columns, and understand relationships.<br>Connect a PostgreSQL or SQL Server database to begin.</p><button class="primary" data-add="true">+ Connect a database</button></div>';
     return;
   }
   const query = $("#search").value.toLowerCase();
@@ -280,6 +304,27 @@ function render() {
       : '<div class="empty">Select Data preview to load source rows.</div>';
     return;
   }
+  if (state.tab === "Partitions" && d?.sqlserver_partitions?.length) {
+    $("#content").innerHTML =
+      `<div class="detail-banner">SQL Server partitions · Key: ${esc(d.partitions[0]?.partition_key)} · Physical partitions belong to this table.</div>` +
+      table(
+        [
+          "Number",
+          "Partition function",
+          "Scheme",
+          "Boundary side",
+          "Lower bound",
+          "Upper bound",
+          "Filegroup",
+          "Est. rows",
+        ],
+        filtered(d.sqlserver_partitions).map(
+          (p) =>
+            `<tr><td>${p.partition_number}</td><td>${esc(p.function_name)}</td><td>${esc(p.scheme)}</td><td>${p.boundary_on_right ? "RANGE RIGHT (lower inclusive)" : "RANGE LEFT (upper inclusive)"}</td><td>${esc(p.lower_bound ?? "-∞")}</td><td>${esc(p.upper_bound ?? "+∞")}</td><td>${esc(p.filegroup)}</td><td>${esc(p.row_count)}</td></tr>`,
+        ),
+      );
+    return;
+  }
   if (!d && state.tab === "Objects")
     $("#content").innerHTML = table(
       ["Object name", "Type", "Owner", "Est. rows", "Description"],
@@ -320,7 +365,7 @@ function render() {
       ],
       filtered(d.constraints.filter((r) => !["p", "f"].includes(r.type))).map(
         (r) =>
-          `<tr><td class="object-name">${esc(r.name)}</td><td>${esc({ u: "Unique", c: "Check", x: "Exclusion", n: "Not null", t: "Constraint trigger" }[r.type] || r.type)}</td><td>${esc(r.attributes.join(", "))}</td><td class="code">${esc(r.condition || r.definition)}</td><td>${esc(r.status)}</td><td>${r.deferrable ? (r.initially_deferred ? "Initially deferred" : "Initially immediate") : "No"}</td></tr>`,
+          `<tr><td class="object-name">${esc(r.name)}</td><td>${esc({ u: "Unique", c: "Check", x: "Exclusion", n: "Not null", t: "Constraint trigger", d: "Default" }[r.type] || r.type)}</td><td>${esc(r.attributes.join(", "))}</td><td class="code">${esc(r.condition || r.definition)}</td><td>${esc(r.status)}</td><td>${r.deferrable ? (r.initially_deferred ? "Initially deferred" : "Initially immediate") : "No"}</td></tr>`,
       ),
     );
   else if (state.tab === "Indexes")
@@ -512,9 +557,22 @@ async function init() {
   if (state.connections.length) await loadConnection(state.connections[0].id);
 }
 function openDialog() {
+  configureEngine();
   $("#connection-feedback").textContent = "";
   $("#connection-dialog").showModal();
 }
+function configureEngine() {
+  const mssql = $("#connection-engine").value === "mssql",
+    port = $("#connection-form [name=port]"),
+    tls = $("#connection-form [name=sslMode]");
+  if (["5432", "1433"].includes(port.value))
+    port.value = mssql ? "1433" : "5432";
+  $("#trust-server-certificate").hidden = !mssql;
+  $("#trust-server-certificate").disabled = !mssql;
+  if (!mssql && tls.value === "trust-server-certificate")
+    tls.value = "verify-full";
+}
+$("#connection-engine").onchange = configureEngine;
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   try {
@@ -556,10 +614,11 @@ async function submitConnection(save) {
       state.connections = await api("/connections");
       $("#connection-dialog").close();
       form.reset();
+      configureEngine();
       await loadConnection(result.id);
     } else
       $("#connection-feedback").textContent =
-        `Connected to ${result.database} · PostgreSQL ${result.version}`;
+        `Connected to ${result.database} · ${engineLabel(result.engine)} ${result.version}`;
   } catch (e) {
     $("#connection-feedback").textContent = e.message;
   } finally {

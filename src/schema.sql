@@ -1,5 +1,6 @@
 ALTER TABLE metadata_connections ADD COLUMN IF NOT EXISTS refresh_interval_minutes integer NOT NULL DEFAULT 0 CHECK(refresh_interval_minutes BETWEEN 0 AND 10080);
 ALTER TABLE metadata_connections ADD COLUMN IF NOT EXISTS history_retention_days integer NOT NULL DEFAULT 0 CHECK(history_retention_days BETWEEN 0 AND 36500);
+ALTER TABLE metadata_connections ADD COLUMN IF NOT EXISTS engine text NOT NULL DEFAULT 'postgres' CHECK(engine IN ('postgres','mssql'));
 CREATE TABLE IF NOT EXISTS metadata_storage_version(version integer PRIMARY KEY CHECK(version=2));
 INSERT INTO metadata_storage_version VALUES(2) ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS metadata_refresh_jobs(
@@ -95,3 +96,13 @@ CREATE TABLE IF NOT EXISTS metadata_changes(
 CREATE INDEX IF NOT EXISTS metadata_changes_connection ON metadata_changes(connection_id,id DESC);
 CREATE INDEX IF NOT EXISTS metadata_changes_job ON metadata_changes(job_id,id);
 CREATE INDEX IF NOT EXISTS metadata_changes_tables ON metadata_changes USING gin(table_ids);
+ALTER TABLE metadata_columns ADD COLUMN IF NOT EXISTS identity_seed text;
+ALTER TABLE metadata_columns ADD COLUMN IF NOT EXISTS identity_increment text;
+ALTER TABLE metadata_type_attributes ADD COLUMN IF NOT EXISTS identity_seed text;
+ALTER TABLE metadata_type_attributes ADD COLUMN IF NOT EXISTS identity_increment text;
+ALTER TABLE metadata_constraints ADD COLUMN IF NOT EXISTS enabled boolean NOT NULL DEFAULT true;
+CREATE TABLE IF NOT EXISTS metadata_sqlserver_partitions(
+  connection_id uuid NOT NULL,table_id bigint NOT NULL,partition_number integer NOT NULL CHECK(partition_number>0),partition_id bigint NOT NULL,
+  function_name text NOT NULL,scheme text NOT NULL,boundary_on_right boolean NOT NULL,lower_bound text,upper_bound text,filegroup text,row_count bigint NOT NULL,
+  PRIMARY KEY(connection_id,table_id,partition_number),
+  FOREIGN KEY(connection_id,table_id) REFERENCES metadata_relations(connection_id,id) ON DELETE CASCADE);

@@ -5,7 +5,7 @@ export const historyScope = `WITH RECURSIVE descendants(id) AS (
 )`;
 export const historyFilter = `c.connection_id=$1 AND ($2::text IS NULL OR
   CASE WHEN c.entity_type IN ('table','partition','logical_key') THEN c.entity_id IN (SELECT id FROM descendants)
-  WHEN c.entity_type='column' THEN split_part(c.entity_id,':',1) IN (SELECT id FROM descendants)
+  WHEN c.entity_type IN ('column','sqlserver_partition') THEN split_part(c.entity_id,':',1) IN (SELECT id FROM descendants)
   WHEN c.entity_type IN ('constraint','index') THEN c.table_ids[1] IN (SELECT id FROM descendants)
   WHEN c.entity_type IN ('composite_type','type_attribute') THEN c.table_ids && ARRAY(SELECT id FROM descendants)
   ELSE false END)`;
