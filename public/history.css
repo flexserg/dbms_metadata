@@ -1,0 +1,35 @@
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.history-job {
+  border-bottom: 1px solid #e2e8ed;
+}
+.history-job summary {
+  cursor: pointer;
+  padding: 16px 20px;
+  color: #365963;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.history-job summary small {
+  color: #84979d;
+  margin-left: 12px;
+}
+.history-job[open] summary {
+  background: #edf5f2;
+}
+.history-job .table-wrap {
+  max-width: 100%;
+}
+.history-job .history-loading {
+  padding: 20px;
+  color: #7c8995;
+}
+.danger {
+  color: #a43d36;
+  border-color: #d8a39f;
+}

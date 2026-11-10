@@ -1,9 +1,14 @@
 import { isDeepStrictEqual } from "node:util";
 import { withTarget, capture } from "./metadata.js";
+import { rememberEdges, pruneHistory } from "./history.js";
 
 export async function migrateSnapshots(pool) {
   await pool.query(`
     ALTER TABLE metadata_connections ADD COLUMN IF NOT EXISTS refresh_interval_minutes integer NOT NULL DEFAULT 0;
+    ALTER TABLE metadata_connections ADD COLUMN IF NOT EXISTS history_retention_days integer NOT NULL DEFAULT 0;
+    CREATE TABLE IF NOT EXISTS metadata_history_edges (
+      connection_id uuid REFERENCES metadata_connections ON DELETE CASCADE,parent_id text NOT NULL,child_id text NOT NULL,
+      PRIMARY KEY(connection_id,parent_id,child_id));
     CREATE TABLE IF NOT EXISTS metadata_refresh_jobs (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), connection_id uuid NOT NULL REFERENCES metadata_connections ON DELETE CASCADE,
       trigger text NOT NULL, status text NOT NULL DEFAULT 'queued', started_at timestamptz NOT NULL DEFAULT now(),
@@ -18,6 +23,7 @@ export async function migrateSnapshots(pool) {
       entity_type text NOT NULL, entity_id text NOT NULL, entity_name text NOT NULL,
       table_ids text[] NOT NULL, operation text NOT NULL, field text NOT NULL, previous_value jsonb, new_value jsonb);
     CREATE INDEX IF NOT EXISTS metadata_changes_connection ON metadata_changes(connection_id,id DESC);
+    CREATE INDEX IF NOT EXISTS metadata_changes_job ON metadata_changes(job_id,id);
     CREATE INDEX IF NOT EXISTS metadata_changes_tables ON metadata_changes USING gin(table_ids);
     CREATE TABLE IF NOT EXISTS metadata_logical_keys (
       connection_id uuid NOT NULL REFERENCES metadata_connections ON DELETE CASCADE,
@@ -274,6 +280,7 @@ export function snapshotService(pool, crypto) {
           )
         ).rows;
         applyLogicalKeys(next, keys);
+        await rememberEdges(db, connectionId, next);
         const previous = (
           await db.query(
             "SELECT payload FROM metadata_snapshots WHERE connection_id=$1 FOR UPDATE",
@@ -327,6 +334,7 @@ export function snapshotService(pool, crypto) {
     if (ticking) return;
     ticking = true;
     try {
+      await pruneHistory(pool);
       const due = (
         await pool.query(`SELECT c.id FROM metadata_connections c WHERE refresh_interval_minutes>0 AND
         COALESCE((SELECT max(started_at) FROM metadata_refresh_jobs j WHERE j.connection_id=c.id AND j.trigger<>'logical-key'),'-infinity'::timestamptz)

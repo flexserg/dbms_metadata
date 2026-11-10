@@ -60,20 +60,9 @@ test("nested types, partition subtrees, and immediate compact preview", async ({
     await page.goto("/");
     await page.locator(`[data-connect="${id}"]`).click();
     await page.locator(`[data-schema="${schema}"]`).click();
-    await page.getByRole("button", { name: "Types", exact: true }).click();
-    await page
-      .getByRole("button", { name: "Expand contact", exact: true })
-      .click();
-    await page
-      .getByRole("button", { name: "Expand home", exact: true })
-      .click();
-    await page
-      .getByRole("button", { name: "Expand point", exact: true })
-      .click();
     await expect(
-      page.getByRole("cell", { name: "latitude", exact: true }),
-    ).toHaveCount(1);
-    await page.getByRole("button", { name: "Objects", exact: true }).click();
+      page.getByRole("button", { name: "Types", exact: true }),
+    ).toHaveCount(0);
     await objectRow("items").locator("td").nth(1).click();
     await page
       .getByRole("button", { name: "Expand customer", exact: true })
@@ -376,6 +365,9 @@ test("snapshot refresh, logical keys, preview, scheduling and table history work
     await page
       .getByRole("button", { name: "Change history", exact: true })
       .click();
+    await expect(page.locator("#content")).not.toContainText("fresh_column");
+    for (const summary of await page.locator(".history-job summary").all())
+      await summary.click();
     await expect(page.locator("#content")).toContainText("fresh_column");
     await expect(page.locator("#content")).toContainText("business_key");
     await expect(page.locator("#content")).toContainText("added");
@@ -383,6 +375,25 @@ test("snapshot refresh, logical keys, preview, scheduling and table history work
       path: "test-results/table-history.png",
       fullPage: true,
     });
+    await page
+      .getByRole("button", { name: "History settings", exact: true })
+      .click();
+    await page.getByLabel("Retention (days)", { exact: true }).fill("14");
+    await page
+      .getByRole("button", { name: "Save retention", exact: true })
+      .click();
+    await expect(page.locator("#history-feedback")).toContainText(
+      "Retention saved",
+    );
+    page.once("dialog", (d) => d.accept());
+    await page
+      .getByRole("button", { name: "Delete historical changes", exact: true })
+      .click();
+    await expect(page.locator("#history-feedback")).toContainText("Deleted");
+    await page
+      .getByRole("button", { name: "Close history settings", exact: true })
+      .click();
+    await expect(page.locator(".history-job")).toHaveCount(0);
     await page.getByRole("button", { name: "Back", exact: false }).click();
     await page
       .getByRole("button", { name: "Refresh jobs", exact: true })

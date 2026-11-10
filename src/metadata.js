@@ -107,7 +107,8 @@ export async function detail(client, oid) {
     await client.query(
       `SELECT c.oid::text AS id, n.nspname AS schema, c.relname AS name, c.relkind,
     pg_get_userbyid(c.relowner) AS owner, obj_description(c.oid,'pg_class') AS comment,
-    (SELECT inhparent::text FROM pg_inherits WHERE inhrelid=c.oid AND c.relispartition LIMIT 1) AS parent_id,
+    (SELECT inhparent::text FROM pg_inherits WHERE inhrelid=c.oid ORDER BY inhseqno LIMIT 1) AS parent_id,
+    ARRAY(SELECT inhparent::text FROM pg_inherits WHERE inhrelid=c.oid ORDER BY inhseqno) AS parent_ids,
     c.reltuples::bigint::text AS estimated_rows,
     CASE WHEN c.relkind IN ('r','p','m') THEN pg_total_relation_size(c.oid)::text ELSE NULL END AS size,
     CASE WHEN c.relkind IN ('v','m') THEN pg_get_viewdef(c.oid,true) ELSE NULL END AS definition

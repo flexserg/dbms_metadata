@@ -6,6 +6,7 @@
     <title>Atlas · PostgreSQL metadata</title>
     <link rel="stylesheet" href="/style.css" />
     <link rel="stylesheet" href="/preview.css" />
+    <link rel="stylesheet" href="/history.css" />
     <script type="module" src="/app.js"></script>
   </head>
   <body>
@@ -213,6 +214,46 @@
             Remove logical key</button
           ><button type="submit" class="primary">Save logical key</button>
         </div>
+      </form>
+    </dialog>
+    <dialog id="history-dialog">
+      <form id="history-form">
+        <div class="dialog-heading">
+          <h2>History settings</h2>
+          <button
+            type="button"
+            id="close-history"
+            class="icon-button"
+            aria-label="Close history settings"
+          >
+            ×
+          </button>
+        </div>
+        <label
+          >Retention (days)<input
+            id="retention-days"
+            type="number"
+            min="0"
+            max="36500"
+            required
+        /></label>
+        <p class="muted">
+          0 keeps change entries indefinitely. Automatic cleanup applies to this
+          entire connection and runs every 30 seconds. Job status summaries are
+          retained.
+        </p>
+        <button class="primary" type="submit">Save retention</button>
+        <hr />
+        <p id="history-delete-scope"></p>
+        <label
+          >Delete entries before (optional)<input
+            id="history-cutoff"
+            type="datetime-local"
+        /></label>
+        <button class="secondary danger" type="button" id="delete-history">
+          Delete historical changes
+        </button>
+        <p id="history-feedback" role="status"></p>
       </form>
     </dialog>
   </body>

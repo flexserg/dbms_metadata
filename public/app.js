@@ -13,6 +13,8 @@ const state = {
   snapshot: null,
   jobs: [],
   history: { changes: [], next: null },
+  historyPages: new Map(),
+  historyOpen: new Set(),
   preview: null,
   previewLoading: false,
   previewError: null,
@@ -201,7 +203,7 @@ function render() {
           "Change history",
           ...(d.definition ? ["Definition"] : []),
         ]
-    : ["Objects", "Types", "Routines", "Refresh jobs", "Change history"];
+    : ["Objects", "Routines", "Refresh jobs", "Change history"];
   $("#tabs").innerHTML =
     (d ? '<button class="tab back" data-back="true">← Back</button>' : "") +
     tabs
@@ -229,23 +231,15 @@ function render() {
     );
   if (state.tab === "Change history") {
     $("#content").innerHTML =
-      '<div class="detail-banner">Changes recorded at refresh time. Baseline capture has no change entries. Related incoming foreign keys and partition-family objects are included.</div>' +
-      table(
-        [
-          "Time / job",
-          "Object",
-          "Change",
-          "Field",
-          "Previous value",
-          "New value",
-        ],
-        filtered(state.history.changes).map(
-          (r) =>
-            `<tr><td>${esc(new Date(r.finished_at || r.started_at).toLocaleString())}<br><small>${esc(r.trigger)} · ${esc(r.job_id.slice(0, 8))}</small></td><td>${esc(r.entity_type)}<br><span class="object-name">${esc(r.entity_name)}</span></td><td>${esc(r.operation)}</td><td>${esc(r.field)}</td><td><pre class="history-value">${esc(JSON.stringify(r.previous_value, null, 2))}</pre></td><td><pre class="history-value">${esc(JSON.stringify(r.new_value, null, 2))}</pre></td></tr>`,
-        ),
-        "No changes recorded",
-        "The first capture establishes a baseline. Later refreshes record observed differences.",
-      ) +
+      `<div class="detail-banner history-toolbar"><span>${d ? "Selected table and its descendants" : "All connection changes"} · Expand a job to load changes</span><button class="secondary" data-history-settings="true">History settings</button></div>` +
+      (state.history.jobs?.length
+        ? filtered(state.history.jobs)
+            .map(
+              (job) =>
+                `<details class="history-job" data-history-job="${job.id}" ${state.historyOpen.has(job.id) ? "open" : ""}><summary>${esc(new Date(job.finished_at || job.started_at).toLocaleString())} · ${esc(job.trigger)} · ${job.change_count} changes <small>${job.id.slice(0, 8)}</small></summary>${historyJobContent(job.id)}</details>`,
+            )
+            .join("")
+        : '<div class="empty">No retained changes. The first capture establishes a baseline.</div>') +
       (state.history.next
         ? '<button class="secondary pager" data-more-history="true">Load older changes</button>'
         : "");
@@ -295,29 +289,6 @@ function render() {
         ({ row: r, depth, hasChildren, open }) =>
           `<tr class="clickable" tabindex="0" data-object="${r.id}"><td class="object-name"><span class="tree-label">${indent(depth)}${hasChildren ? `<button class="tree-toggle" data-object-toggle="${r.id}" aria-expanded="${open}" aria-label="${open ? "Collapse" : "Expand"} table ${esc(r.name)}">${open ? "▾" : "▸"}</button>` : '<span class="tree-spacer"></span>'}<span class="object-glyph">▦</span>${esc(r.name)}</span></td><td><span class="type-pill">${esc(r.kind)}</span></td><td>${esc(r.owner)}</td><td class="code">${Number(r.estimated_rows) < 0 ? "—" : esc(r.estimated_rows)}</td><td>${esc(r.comment)}</td></tr>`,
       ),
-    );
-  else if (!d && state.tab === "Types")
-    $("#content").innerHTML = table(
-      [
-        "#",
-        "Type / attribute",
-        "Data type",
-        "Nullable",
-        "Default / identity",
-        "Comment",
-      ],
-      columnRows(
-        filtered(state.types).map((t) => ({
-          name: t.name,
-          type: t.type,
-          type_id: t.id,
-          comment: t.comment,
-        })),
-        state.typeDefinitions,
-        "type",
-      ),
-      "No saved composite types",
-      "Refresh metadata to collect composite type definitions from the source.",
     );
   else if (!d)
     $("#content").innerHTML = table(
@@ -663,14 +634,16 @@ async function loadTab(tab, more = false, offset = 0) {
     generation = ++state.generation;
   const base = `/connections/${id}`;
   if (tab === "Change history") {
+    if (!more) {
+      state.historyPages.clear();
+      state.historyOpen.clear();
+    }
     const page = await api(
-      `${base}/history?${oid ? "oid=" + oid + "&" : ""}${more ? "before=" + state.history.next : ""}`,
+      `${base}/history-jobs?${oid ? "oid=" + oid + "&" : ""}${more ? "before=" + state.history.next : ""}`,
     );
     if (generation !== state.generation) return;
     state.history = {
-      changes: more
-        ? [...state.history.changes, ...page.changes]
-        : page.changes,
+      jobs: more ? [...state.history.jobs, ...page.jobs] : page.jobs,
       next: page.next,
     };
   } else if (tab === "Refresh jobs") {
@@ -699,6 +672,113 @@ async function loadTab(tab, more = false, offset = 0) {
   state.tab = tab;
   render();
 }
+function historyJobContent(id) {
+  const p = state.historyPages.get(id);
+  if (!p || p.loading)
+    return '<div class="history-loading" role="status">Loading changes…</div>';
+  if (p.error)
+    return `<div class="history-loading" role="alert">${esc(p.error)}</div>`;
+  return (
+    table(
+      ["Object", "Change", "Field", "Previous value", "New value"],
+      p.changes.map(
+        (r) =>
+          `<tr><td>${esc(r.entity_type)}<br>${esc(r.entity_name)}</td><td>${esc(r.operation)}</td><td>${esc(r.field)}</td><td><pre class="history-value">${esc(JSON.stringify(r.previous_value, null, 2))}</pre></td><td><pre class="history-value">${esc(JSON.stringify(r.new_value, null, 2))}</pre></td></tr>`,
+      ),
+      "No retained changes",
+      "These entries may have been removed by retention.",
+    ) +
+    (p.next
+      ? `<button class="secondary pager" data-more-job="${id}">Load more changes in job</button>`
+      : "")
+  );
+}
+async function loadHistoryJob(id, more = false) {
+  const revision = state.generation,
+    previous = state.historyPages.get(id);
+  state.historyPages.set(id, { ...previous, loading: true });
+  render();
+  try {
+    const p = await api(
+      `/connections/${state.connection.id}/history?job=${id}${state.detail?.id ? "&oid=" + state.detail.id : ""}${more ? "&before=" + previous.next : ""}`,
+    );
+    if (revision !== state.generation) return;
+    state.historyPages.set(id, {
+      changes: more ? [...previous.changes, ...p.changes] : p.changes,
+      next: p.next,
+    });
+  } catch (e) {
+    if (revision !== state.generation) return;
+    state.historyPages.set(id, { error: e.message });
+  }
+  render();
+}
+document.addEventListener(
+  "toggle",
+  (e) => {
+    const el = e.target;
+    if (
+      !el.matches("details[data-history-job]") ||
+      state.tab !== "Change history"
+    )
+      return;
+    const id = el.dataset.historyJob;
+    if (el.open) {
+      state.historyOpen.add(id);
+      if (!state.historyPages.has(id)) loadHistoryJob(id);
+    } else state.historyOpen.delete(id);
+  },
+  true,
+);
+function historySettings() {
+  $("#retention-days").value = state.connection.history_retention_days || 0;
+  $("#history-delete-scope").textContent = state.detail
+    ? `Delete history for ${state.detail.schema}.${state.detail.name} and its descendants.`
+    : "Delete history for this entire connection.";
+  $("#history-cutoff").value = "";
+  $("#history-feedback").textContent = "";
+  $("#history-dialog").showModal();
+}
+$("#close-history").onclick = () => $("#history-dialog").close();
+$("#history-form").onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    const days = Number($("#retention-days").value);
+    await api(`/connections/${state.connection.id}/history-settings`, {
+      method: "PATCH",
+      body: { days },
+    });
+    state.connection.history_retention_days = days;
+    $("#history-feedback").textContent = "Retention saved";
+  } catch (e) {
+    $("#history-feedback").textContent = e.message;
+  }
+};
+$("#delete-history").onclick = async () => {
+  if (
+    !confirm(
+      "Permanently delete historical change entries for the displayed scope?",
+    )
+  )
+    return;
+  try {
+    const cutoff = $("#history-cutoff").value;
+    const result = await api(`/connections/${state.connection.id}/history`, {
+      method: "DELETE",
+      body: {
+        oid: state.detail?.id || null,
+        before: cutoff ? new Date(cutoff).toISOString() : null,
+      },
+    });
+    state.historyPages.clear();
+    state.historyOpen.clear();
+    await loadTab("Change history");
+    $("#history-feedback").textContent =
+      `Deleted ${result.deleted} change entries`;
+  } catch (e) {
+    $("#history-feedback").textContent = e.message;
+  }
+};
 function editKey() {
   const d = state.detail,
     k = d.logical_keys[0];
@@ -752,11 +832,14 @@ $("#logical-key-form").onsubmit = (e) => {
 $("#remove-logical-key").onclick = () => saveKey(true);
 document.addEventListener("click", async (e) => {
   const el = e.target.closest(
-    "[data-connect],[data-delete],[data-schema],[data-tab],[data-object],[data-back],[data-add],[data-routine],[data-edit-key],[data-more-history],[data-preview-offset],[data-type-toggle],[data-object-toggle],[data-partition-toggle]",
+    "[data-connect],[data-delete],[data-schema],[data-tab],[data-object],[data-back],[data-add],[data-routine],[data-edit-key],[data-more-history],[data-preview-offset],[data-type-toggle],[data-object-toggle],[data-partition-toggle],[data-history-settings],[data-more-job]",
   );
   if (!el) return;
   try {
-    if (
+    if ("historySettings" in el.dataset) historySettings();
+    else if ("moreJob" in el.dataset)
+      await loadHistoryJob(el.dataset.moreJob, true);
+    else if (
       "typeToggle" in el.dataset ||
       "objectToggle" in el.dataset ||
       "partitionToggle" in el.dataset
