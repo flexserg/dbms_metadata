@@ -14,6 +14,14 @@ const state = {
   jobs: [],
   history: { changes: [], next: null },
   preview: null,
+  previewLoading: false,
+  previewError: null,
+  previewOffset: 0,
+  types: [],
+  typeDefinitions: [],
+  typeExpanded: new Set(),
+  expandedObjects: new Set(),
+  expandedPartitions: new Set(),
 };
 const esc = (value) =>
   String(value ?? "—").replace(
@@ -68,6 +76,72 @@ function table(
 function stat(label, value, note) {
   return `<div class="stat"><div class="stat-label">${esc(label)}</div><div class="stat-value">${esc(value)}</div><div class="stat-note">${esc(note)}</div></div>`;
 }
+const indent = (depth) =>
+  '<span class="tree-indent" aria-hidden="true"></span>'.repeat(depth);
+function hierarchy(rows, expanded, query = "") {
+  const byId = new Map(rows.map((r) => [r.id, r])),
+    children = new Map();
+  for (const r of rows) {
+    if (!children.has(r.parent_id)) children.set(r.parent_id, []);
+    children.get(r.parent_id).push(r);
+  }
+  const matches = (r, seen = new Set()) => {
+    if (seen.has(r.id)) return false;
+    seen.add(r.id);
+    return (
+      JSON.stringify(r).toLowerCase().includes(query) ||
+      (children.get(r.id) || []).some((c) => matches(c, seen))
+    );
+  };
+  const result = [],
+    seen = new Set();
+  function visit(r, depth) {
+    if (seen.has(r.id) || (query && !matches(r))) return;
+    seen.add(r.id);
+    const nested = children.get(r.id) || [],
+      open = expanded.has(r.id) || !!query;
+    result.push({ row: r, depth, hasChildren: !!nested.length, open });
+    if (open) for (const child of nested) visit(child, depth + 1);
+  }
+  for (const r of rows) if (!byId.has(r.parent_id)) visit(r, 0);
+  return result;
+}
+function columnRows(columns, definitions, prefix) {
+  const types = new Map(definitions.map((t) => [t.id, t])),
+    rows = [];
+  function composite(id) {
+    const seen = new Set();
+    while (id && !seen.has(id)) {
+      seen.add(id);
+      const t = types.get(id);
+      if (!t) return null;
+      if (t.kind === "c") return t;
+      id = t.base_type_id || t.element_type_id;
+    }
+    return null;
+  }
+  function visit(r, path, depth, ancestors) {
+    const type = composite(r.type_id),
+      cycle = type && ancestors.has(type.id),
+      expandable = !!type?.attributes.length && !cycle;
+    const open = state.typeExpanded.has(path);
+    const toggle = expandable
+      ? `<button class="tree-toggle" data-type-toggle="${esc(path)}" aria-expanded="${open}" aria-label="${open ? "Collapse" : "Expand"} ${esc(r.name)}">${open ? "▾" : "▸"}</button>`
+      : '<span class="tree-spacer"></span>';
+    rows.push(
+      `<tr class="${depth ? "nested-type-row" : ""}"><td>${esc(r.position)}</td><td class="object-name"><span class="tree-label">${indent(depth)}${toggle}${r.primary_key ? '<span class="key">⚿</span>' : ""}${esc(r.name)}</span></td><td class="code">${esc(r.type)}${cycle ? ' <small class="muted">(recursive reference)</small>' : ""}</td><td>${r.nullable == null ? "—" : r.nullable ? "Yes" : "No"}</td><td class="code">${esc(r.identity ? "GENERATED " + (r.identity === "a" ? "ALWAYS" : "BY DEFAULT") + " AS IDENTITY" : r.generated ? `GENERATED ALWAYS AS (${r.default}) ${r.generated === "s" ? "STORED" : "VIRTUAL"}` : r.default)}</td><td>${esc(r.comment)}</td></tr>`,
+    );
+    if (expandable && open) {
+      const seen = new Set(ancestors);
+      seen.add(type.id);
+      for (const a of type.attributes)
+        visit(a, `${path}/${a.position}`, depth + 1, seen);
+    }
+  }
+  for (const c of columns)
+    visit(c, `${prefix}/${c.position ?? c.type_id}`, 0, new Set());
+  return rows;
+}
 function navigator() {
   $("#connections").innerHTML = state.connections.length
     ? state.connections
@@ -81,6 +155,14 @@ function navigator() {
 function render() {
   navigator();
   const d = state.detail;
+  $("#content").classList.toggle(
+    "preview-content",
+    state.tab === "Data preview",
+  );
+  $("#content").setAttribute(
+    "aria-busy",
+    String(state.tab === "Data preview" && state.previewLoading),
+  );
   $("#snapshot-bar").hidden = !state.connection;
   $("#snapshot-info").textContent = state.snapshot
     ? `Saved snapshot · ${new Date(state.snapshot.captured_at).toLocaleString()} · Browse offline`
@@ -119,7 +201,7 @@ function render() {
           "Change history",
           ...(d.definition ? ["Definition"] : []),
         ]
-    : ["Objects", "Routines", "Refresh jobs", "Change history"];
+    : ["Objects", "Types", "Routines", "Refresh jobs", "Change history"];
   $("#tabs").innerHTML =
     (d ? '<button class="tab back" data-back="true">← Back</button>' : "") +
     tabs
@@ -181,13 +263,23 @@ function render() {
   }
   if (state.tab === "Data preview") {
     const p = state.preview;
+    if (state.previewLoading) {
+      $("#content").innerHTML =
+        '<div class="preview-loading" role="status"><span class="preview-spinner" aria-hidden="true"></span>Retrieving data from source…</div>';
+      return;
+    }
+    if (state.previewError) {
+      $("#content").innerHTML =
+        `<div class="preview-error" role="alert">${esc(state.previewError)} <button class="secondary" data-preview-offset="${state.previewOffset}">Retry data preview</button></div>`;
+      return;
+    }
     $("#content").innerHTML = p
       ? '<div class="detail-banner">Live source data · Up to 50 rows per page · Row order is not guaranteed · Values may be truncated. Preview data is never stored.</div>' +
         table(
           p.columns,
           p.rows.map(
             (row) =>
-              `<tr>${row.map((v) => `<td class="code">${v === null ? '<span class="muted">NULL</span>' : esc(v)}</td>`).join("")}</tr>`,
+              `<tr>${row.map((v) => `<td class="code" title="${esc(v)}">${v === null ? '<span class="muted">NULL</span>' : esc(v)}</td>`).join("")}</tr>`,
           ),
           "No rows returned",
           "The source returned no visible rows at this offset.",
@@ -199,10 +291,33 @@ function render() {
   if (!d && state.tab === "Objects")
     $("#content").innerHTML = table(
       ["Object name", "Type", "Owner", "Est. rows", "Description"],
-      filtered(state.objects).map(
-        (r) =>
-          `<tr class="clickable" tabindex="0" data-object="${r.id}"><td class="object-name"><span class="object-glyph">▦</span>${esc(r.name)}</td><td><span class="type-pill">${esc(r.kind)}</span></td><td>${esc(r.owner)}</td><td class="code">${Number(r.estimated_rows) < 0 ? "—" : esc(r.estimated_rows)}</td><td>${esc(r.comment)}</td></tr>`,
+      hierarchy(state.objects, state.expandedObjects, query).map(
+        ({ row: r, depth, hasChildren, open }) =>
+          `<tr class="clickable" tabindex="0" data-object="${r.id}"><td class="object-name"><span class="tree-label">${indent(depth)}${hasChildren ? `<button class="tree-toggle" data-object-toggle="${r.id}" aria-expanded="${open}" aria-label="${open ? "Collapse" : "Expand"} table ${esc(r.name)}">${open ? "▾" : "▸"}</button>` : '<span class="tree-spacer"></span>'}<span class="object-glyph">▦</span>${esc(r.name)}</span></td><td><span class="type-pill">${esc(r.kind)}</span></td><td>${esc(r.owner)}</td><td class="code">${Number(r.estimated_rows) < 0 ? "—" : esc(r.estimated_rows)}</td><td>${esc(r.comment)}</td></tr>`,
       ),
+    );
+  else if (!d && state.tab === "Types")
+    $("#content").innerHTML = table(
+      [
+        "#",
+        "Type / attribute",
+        "Data type",
+        "Nullable",
+        "Default / identity",
+        "Comment",
+      ],
+      columnRows(
+        filtered(state.types).map((t) => ({
+          name: t.name,
+          type: t.type,
+          type_id: t.id,
+          comment: t.comment,
+        })),
+        state.typeDefinitions,
+        "type",
+      ),
+      "No saved composite types",
+      "Refresh metadata to collect composite type definitions from the source.",
     );
   else if (!d)
     $("#content").innerHTML = table(
@@ -222,9 +337,10 @@ function render() {
         "Default / identity",
         "Comment",
       ],
-      filtered(d.columns).map(
-        (r) =>
-          `<tr><td>${r.position}</td><td class="object-name">${r.primary_key ? '<span class="key">⚿</span>' : ""}${esc(r.name)}</td><td class="code">${esc(r.type)}</td><td>${r.nullable ? "Yes" : "No"}</td><td class="code">${esc(r.identity ? "GENERATED " + (r.identity === "a" ? "ALWAYS" : "BY DEFAULT") + " AS IDENTITY" : r.generated ? `GENERATED ALWAYS AS (${r.default}) ${r.generated === "s" ? "STORED" : "VIRTUAL"}` : r.default)}</td><td>${esc(r.comment)}</td></tr>`,
+      columnRows(
+        filtered(d.columns),
+        d.types || state.typeDefinitions,
+        `column/${d.id}`,
       ),
     );
   else if (state.tab === "Constraints")
@@ -282,10 +398,17 @@ function render() {
       );
   else if (state.tab === "Partitions")
     $("#content").innerHTML = table(
-      ["Name", "Parent", "Level", "Method", "Partition key", "Bounds"],
-      filtered(d.partitions).map(
-        (r) =>
-          `<tr><td class="object-name">${esc(r.schema)}.${esc(r.name)}</td><td>${esc(r.parent)}</td><td>${r.level}</td><td>${esc(r.method)}</td><td class="code">${esc(r.partition_key)}</td><td class="code">${esc(r.bounds)}</td></tr>`,
+      [
+        "Name",
+        "Parent",
+        "Level",
+        "Own partition method",
+        "Own partition key",
+        "Bounds in parent",
+      ],
+      hierarchy(d.partitions, state.expandedPartitions, query).map(
+        ({ row: r, depth, hasChildren, open }) =>
+          `<tr><td class="object-name"><span class="tree-label">${indent(depth)}${hasChildren ? `<button class="tree-toggle" data-partition-toggle="${r.id}" aria-expanded="${open}" aria-label="${open ? "Collapse" : "Expand"} partition ${esc(r.name)}">${open ? "▾" : "▸"}</button>` : '<span class="tree-spacer"></span>'}${esc(r.schema)}.${esc(r.name)}</span></td><td>${esc(r.parent)}</td><td>${r.level}</td><td>${esc(r.method)}</td><td class="code">${esc(r.partition_key)}</td><td class="code" title="${esc(r.parent_method)} · ${esc(r.parent_partition_key)}">${esc(r.bounds)}</td></tr>`,
       ),
     );
   else $("#content").innerHTML = `<pre>${esc(d.definition)}</pre>`;
@@ -317,6 +440,11 @@ async function loadConnection(id, preferred = {}) {
   state.jobs = [];
   state.history = { changes: [], next: null };
   state.preview = null;
+  state.previewLoading = false;
+  state.previewError = null;
+  state.typeExpanded.clear();
+  state.types = [];
+  state.typeDefinitions = [];
   $("#refresh-interval").value =
     state.connection?.refresh_interval_minutes || 0;
   notice("");
@@ -371,6 +499,7 @@ async function loadConnection(id, preferred = {}) {
       );
       if (revision !== state.generation) return;
       state.detail = detail;
+      state.expandedPartitions = new Set([detail.id]);
       state.tab = "Columns";
       render();
     }
@@ -388,19 +517,25 @@ async function loadSchema(name) {
   state.tab = "Objects";
   state.objects = [];
   state.routines = [];
+  state.types = [];
+  state.typeDefinitions = [];
+  state.expandedObjects.clear();
   $("#search").value = "";
   render();
   if (!name) return;
   $("#content").innerHTML = '<div class="loading">Reading schema…</div>';
   try {
     const base = `/connections/${state.connection.id}`;
-    const [objects, routines] = await Promise.all([
+    const [objects, routines, types] = await Promise.all([
       api(`${base}/objects?schema=${encodeURIComponent(name)}`),
       api(`${base}/routines?schema=${encodeURIComponent(name)}`),
+      api(`${base}/types?schema=${encodeURIComponent(name)}`),
     ]);
     if (generation !== state.generation) return;
     state.objects = objects;
     state.routines = routines;
+    state.types = types.types;
+    state.typeDefinitions = types.definitions;
     notice("");
     render();
   } catch (e) {
@@ -543,9 +678,23 @@ async function loadTab(tab, more = false, offset = 0) {
     if (generation !== state.generation) return;
     state.jobs = jobs;
   } else if (tab === "Data preview") {
-    const data = await api(`${base}/preview?oid=${oid}&offset=${offset}`);
-    if (generation !== state.generation) return;
-    state.preview = data;
+    state.tab = tab;
+    state.previewLoading = true;
+    state.previewError = null;
+    state.previewOffset = offset;
+    state.preview = null;
+    render();
+    try {
+      const data = await api(`${base}/preview?oid=${oid}&offset=${offset}`);
+      if (generation !== state.generation) return;
+      state.preview = data;
+    } catch (e) {
+      if (generation !== state.generation) return;
+      state.previewError = e.message;
+    }
+    state.previewLoading = false;
+    render();
+    return;
   }
   state.tab = tab;
   render();
@@ -570,6 +719,7 @@ async function saveKey(remove = false) {
   const button = $("#logical-key-form button[type=submit]");
   button.disabled = true;
   try {
+    const definitions = state.detail.types;
     state.detail = await api(
       `/connections/${state.connection.id}/logical-key?oid=${state.detail.id}`,
       {
@@ -586,6 +736,7 @@ async function saveKey(remove = false) {
             },
       },
     );
+    state.detail.types = definitions;
     $("#logical-key-dialog").close();
     render();
   } catch (e) {
@@ -601,11 +752,25 @@ $("#logical-key-form").onsubmit = (e) => {
 $("#remove-logical-key").onclick = () => saveKey(true);
 document.addEventListener("click", async (e) => {
   const el = e.target.closest(
-    "[data-connect],[data-delete],[data-schema],[data-tab],[data-object],[data-back],[data-add],[data-routine],[data-edit-key],[data-more-history],[data-preview-offset]",
+    "[data-connect],[data-delete],[data-schema],[data-tab],[data-object],[data-back],[data-add],[data-routine],[data-edit-key],[data-more-history],[data-preview-offset],[data-type-toggle],[data-object-toggle],[data-partition-toggle]",
   );
   if (!el) return;
   try {
-    if ("editKey" in el.dataset) editKey();
+    if (
+      "typeToggle" in el.dataset ||
+      "objectToggle" in el.dataset ||
+      "partitionToggle" in el.dataset
+    ) {
+      const [key, set] =
+        "typeToggle" in el.dataset
+          ? [el.dataset.typeToggle, state.typeExpanded]
+          : "objectToggle" in el.dataset
+            ? [el.dataset.objectToggle, state.expandedObjects]
+            : [el.dataset.partitionToggle, state.expandedPartitions];
+      if (set.has(key)) set.delete(key);
+      else set.add(key);
+      render();
+    } else if ("editKey" in el.dataset) editKey();
     else if ("moreHistory" in el.dataset) await loadTab("Change history", true);
     else if ("previewOffset" in el.dataset)
       await loadTab("Data preview", false, Number(el.dataset.previewOffset));
@@ -640,6 +805,7 @@ document.addEventListener("click", async (e) => {
       );
       if (generation !== state.generation) return;
       state.detail = d;
+      state.expandedPartitions = new Set([d.id]);
       state.tab = "Columns";
       state.preview = null;
       state.history = { changes: [], next: null };

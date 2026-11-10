@@ -38,6 +38,38 @@ export function entities(snapshot) {
       value,
     });
   if (!snapshot) return result;
+  const parents = new Map(),
+    partitionNodes = new Map();
+  for (const r of snapshot.relations) {
+    for (const p of r.partitions) {
+      parents.set(p.id, p.parent_id);
+      partitionNodes.set(p.id, p);
+    }
+    if (Object.hasOwn(r, "parent_id")) parents.set(r.id, r.parent_id);
+  }
+  function lineage(id) {
+    const seen = new Set([id]),
+      ancestors = [];
+    while (parents.get(id) && !seen.has(parents.get(id))) {
+      id = parents.get(id);
+      seen.add(id);
+      ancestors.push(id);
+    }
+    return ancestors;
+  }
+  const typeGraph = new Map((snapshot.types || []).map((t) => [t.id, t])),
+    typeTables = new Map();
+  function linkType(id, tables, seen = new Set()) {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    const t = typeGraph.get(id);
+    if (!t) return;
+    if (!typeTables.has(id)) typeTables.set(id, new Set());
+    for (const table of tables) typeTables.get(id).add(table);
+    linkType(t.element_type_id, tables, seen);
+    linkType(t.base_type_id, tables, seen);
+    for (const a of t.attributes) linkType(a.type_id, tables, seen);
+  }
   for (const s of snapshot.schemas) {
     const { objects, ...value } = s;
     add("schema", s.id, s.name, [], value);
@@ -53,13 +85,8 @@ export function entities(snapshot) {
       estimated_rows,
       ...value
     } = r;
-    const ancestors = [];
-    let p = partitions.find((p) => p.id === r.id);
-    while (p?.parent_id) {
-      ancestors.push(p.parent_id);
-      p = partitions.find((x) => x.id === p.parent_id);
-    }
-    const tables = [r.id, ...ancestors];
+    const tables = [r.id, ...lineage(r.id)];
+    for (const c of columns) linkType(c.type_id, tables);
     add("table", r.id, `${r.schema}.${r.name}`, tables, value);
     for (const c of columns)
       add(
@@ -81,14 +108,35 @@ export function entities(snapshot) {
       add("index", i.id, `${r.schema}.${r.name}.${i.name}`, tables, i);
     for (const k of logical_keys)
       add("logical_key", r.id, `${r.schema}.${r.name}.${k.name}`, tables, k);
-    // A partition is recorded once and linked to its complete partition family.
-    for (const p of partitions)
+  }
+  const families = new Map();
+  for (const p of partitionNodes.values()) {
+    const root = lineage(p.id).at(-1) || p.id;
+    if (!families.has(root)) families.set(root, []);
+    families.get(root).push(p.id);
+  }
+  for (const p of partitionNodes.values()) {
+    const { level, absolute_level, ...value } = p;
+    add(
+      "partition",
+      p.id,
+      `${p.schema}.${p.name}`,
+      families.get(lineage(p.id).at(-1) || p.id),
+      { ...value, level: absolute_level ?? level },
+    );
+  }
+  for (const t of typeGraph.values()) {
+    if (t.kind !== "c" || t.relation_kind !== "c") continue;
+    const { attributes, ...value } = t,
+      tables = [...(typeTables.get(t.id) || [])];
+    add("composite_type", t.id, `${t.schema}.${t.name}`, tables, value);
+    for (const a of attributes)
       add(
-        "partition",
-        p.id,
-        `${p.schema}.${p.name}`,
-        partitions.map((x) => x.id),
-        p,
+        "type_attribute",
+        `${t.id}:${a.position}`,
+        `${t.schema}.${t.name}.${a.name}`,
+        tables,
+        a,
       );
   }
   for (const r of snapshot.routines)

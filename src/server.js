@@ -281,6 +281,16 @@ export async function createApp(config = process.env) {
           "No saved snapshot yet. Run Refresh metadata to capture the source.",
       });
     const s = saved.payload;
+    if (resource === "types")
+      return res.json({
+        definitions: s.types || [],
+        types: (s.types || []).filter(
+          (t) =>
+            t.kind === "c" &&
+            t.relation_kind === "c" &&
+            t.schema === String(req.query.schema || "public"),
+        ),
+      });
     if (resource === "snapshot")
       return res.json({ captured_at: saved.captured_at, job_id: saved.job_id });
     const data =
@@ -315,7 +325,7 @@ export async function createApp(config = process.env) {
       return res
         .status(404)
         .json({ error: "Object or resource not found in latest snapshot" });
-    res.json(data);
+    res.json(resource === "detail" ? { ...data, types: s.types || [] } : data);
   });
   app.use(express.static(fileURLToPath(new URL("../public", import.meta.url))));
   app.use((error, _req, res, _next) => {

@@ -52,13 +52,17 @@ Table tabs:
 | Keys           | Primary and platform logical primary key names/attributes; FK names, ordered attributes, referenced table/attributes, ON DELETE/UPDATE, validation status                |
 | Indexes        | All indexes including constraint indexes, access method, key expressions/attributes, INCLUDE columns, uniqueness, linked constraint, validity/readiness, full definition |
 | Constraints    | UNIQUE/CHECK/EXCLUDE and other catalog constraint types, ordered attributes, condition/definition, validation status, deferrability                                      |
-| Partitions     | Partition name, parent, level, RANGE/LIST/HASH method, key, bounds; includes the root and partition family                                                               |
+| Partitions     | Expandable subtree starting at the selected table (level 0); own RANGE/LIST/HASH method and key, bounds assigned by the parent                                           |
 | Data preview   | Live read-only rows, 50 per UI page; API maximum 100, offset maximum 100000, cell/output truncation                                                                      |
 | Change history | Job/time, object, operation, changed field, previous value, new value                                                                                                    |
 
 **Define logical primary key** on the Keys tab stores one logical key per table in the platform. Select attributes in table column order. This does not create a source constraint or verify/enforce uniqueness. Edits are recorded immediately as `logical-key` jobs and overlaid on later source captures. Removed source columns invalidate the logical key until edited. Only source capture updates the displayed snapshot timestamp.
 
-Data preview is never persisted or added to history. It uses the target role's SELECT permissions and row-level policies. Rows have no guaranteed ordering and concurrent writes can shift page boundaries. Output is limited to 4096 characters per cell and approximately two million characters per response; the source query can still read large underlying values. Views/foreign tables may execute source-side expressions under the read-only transaction.
+Composite columns expand into their attributes on the Columns tab, recursively including nested composites, arrays of composites, and domains over composites. The schema-level Types tab provides the same expansion for standalone composite types. Definitions are captured once in the snapshot's type graph and remain available offline; recursive references are marked instead of expanding forever. Changes to named composite attributes are linked to the tables using them, including indirect nested references.
+
+Partition parents expand/collapse on both Objects and Partitions tabs. A selected child shows itself and descendants, not ancestors or siblings; its actual parent name is still displayed. **Own partition method/key** describe how that table partitions its children; **Bounds in parent** describe how the parent routes rows into that table. A leaf has bounds but no own method/key. A subpartitioned child can have both bounds and its own, different method/key. Hover over bounds to see the parent's partitioning scheme.
+
+Data preview opens immediately with a loading indicator, shows errors and a retry action in the tab, and ignores late responses after navigation away. Its compact grid, sticky headers and scrolling are styled separately in `public/preview.css`; metadata tables retain their normal spacing. Preview is never persisted or added to history. It uses the target role's SELECT permissions and row-level policies. Rows have no guaranteed ordering and concurrent writes can shift page boundaries. Output is limited to 4096 characters per cell and approximately two million characters per response; the source query can still read large underlying values. Views/foreign tables may execute source-side expressions under the read-only transaction.
 
 Authenticated API endpoints (under `/api/connections/:id`): `POST /refresh` returns HTTP 202 with a job; `GET /jobs`, `/snapshot`, `/history?oid=TABLE_OID&before=CHANGE_ID&limit=100`; `PATCH /schedule` with `{ "minutes": 5 }`; `GET /preview?oid=TABLE_OID&limit=50&offset=0`; `PUT /logical-key?oid=TABLE_OID` with `{ "name": "business_pk", "positions": [1,2] }` or `{ "remove": true }`. Navigation endpoints read the saved snapshot and return 409 until a first capture succeeds.
 
@@ -97,14 +101,14 @@ Back up the application PostgreSQL database and APP_KEY before upgrading. Keep t
 
 ```sh
 git pull --ff-only origin feat/postgresql-metadata-browser
-docker build -t docker.io/library/dbms-metadata:snapshots-1 .
-docker save docker.io/library/dbms-metadata:snapshots-1 -o /tmp/dbms-metadata-snapshots-1.tar
-sudo k3s ctr -n k8s.io images import /tmp/dbms-metadata-snapshots-1.tar
-kubectl -n dbms-metadata set image deployment/metadata app=docker.io/library/dbms-metadata:snapshots-1
+docker build -t docker.io/library/dbms-metadata:1.1.1 .
+docker save docker.io/library/dbms-metadata:1.1.1 -o /tmp/dbms-metadata-1.1.1.tar
+sudo k3s ctr -n k8s.io images import /tmp/dbms-metadata-1.1.1.tar
+kubectl -n dbms-metadata set image deployment/metadata app=docker.io/library/dbms-metadata:1.1.1
 kubectl -n dbms-metadata rollout status deployment/metadata --timeout=180s
 ```
 
-Keep `imagePullPolicy: Never` and your existing `COOKIE_SECURE=false` setting if serving trusted HTTP. Import the image on every eligible k3s node. Save these choices in your local Deployment YAML. Do not reapply unmodified base manifests over customized Service/Ingress ports. Database migration is automatic at application startup; existing connection profiles and encrypted passwords are retained. Refresh each connection once to establish its baseline; historical changes before that baseline cannot be recovered.
+Keep `imagePullPolicy: Never` and your existing `COOKIE_SECURE=false` setting if serving trusted HTTP. Import the image on every eligible k3s node. Save these choices in your local Deployment YAML. Do not reapply unmodified base manifests over customized Service/Ingress ports. Database migration is automatic at application startup; existing connection profiles and encrypted passwords are retained. Refresh each connection once to establish its baseline; historical changes before that baseline cannot be recovered. After upgrading to 1.1.1, refresh existing snapshots once to collect composite definitions, column type IDs, and corrected partition fields. The first refresh can record changes for the newly collected fields; older saved snapshots remain browsable before refresh.
 
 ## Configuration and access
 

@@ -1,3 +1,31 @@
+.tree-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.tree-toggle {
+  background: transparent;
+  color: #19766d;
+  padding: 2px 4px;
+  font-size: 13px;
+  line-height: 18px;
+  flex-shrink: 0;
+}
+.tree-toggle:hover {
+  background: #e8f2ef;
+}
+.tree-spacer,
+.tree-indent {
+  display: inline-block;
+  width: 17px;
+  flex-shrink: 0;
+}
+.nested-type-row {
+  background: #f8fbfa;
+}
+.nested-type-row .object-name {
+  font-weight: 400;
+}
 .snapshot-bar {
   display: flex;
   justify-content: space-between;
