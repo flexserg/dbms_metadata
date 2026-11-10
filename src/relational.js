@@ -48,6 +48,8 @@ const field = (r) => ({
   nullable: r.nullable,
   default_expression: r.default ?? null,
   identity_kind: r.identity || "",
+  identity_seed: r.identity_seed ?? null,
+  identity_increment: r.identity_increment ?? null,
   generated_kind: r.generated || "",
   comment: r.comment ?? null,
 });
@@ -160,6 +162,7 @@ export async function writeSnapshot(db, id, job, s) {
         on_update: k.on_update,
         condition: k.condition,
         validated: k.validated,
+        enabled: k.enabled ?? true,
         deferrable: k.deferrable,
         initially_deferred: k.initially_deferred,
         comment: k.comment,
@@ -261,6 +264,17 @@ export async function writeSnapshot(db, id, job, s) {
       definition: r.definition,
     })),
   );
+  await insertRows(
+    db,
+    "metadata_sqlserver_partitions",
+    s.relations.flatMap((r) =>
+      (r.sqlserver_partitions || []).map((p) => ({
+        connection_id: id,
+        table_id: r.id,
+        ...p,
+      })),
+    ),
+  );
 }
 export async function logicalKeys(db, id) {
   return (
@@ -318,17 +332,17 @@ const relationSQL = `SELECT r.id::text,s.name AS schema,r.name,r.kind,r.relkind,
   COALESCE((SELECT array_agg(i.parent_id::text ORDER BY i.ordinal) FROM metadata_inheritance i WHERE i.connection_id=r.connection_id AND i.child_id=r.id),'{}'::text[]) AS parent_ids,
   (SELECT i.parent_id::text FROM metadata_inheritance i WHERE i.connection_id=r.connection_id AND i.child_id=r.id ORDER BY i.ordinal LIMIT 1) AS parent_id
   FROM metadata_relations r JOIN metadata_schemas s ON s.connection_id=r.connection_id AND s.id=r.schema_id WHERE r.connection_id=$1`;
-const columnSQL = `SELECT c.table_id::text,c.position,c.name,c.type_id::text,c.formatted_type AS type,c.nullable,c.default_expression AS default,c.identity_kind AS identity,c.generated_kind AS generated,c.comment,
+const columnSQL = `SELECT c.table_id::text,c.position,c.name,c.type_id::text,c.formatted_type AS type,c.nullable,c.default_expression AS default,c.identity_kind AS identity,c.identity_seed,c.identity_increment,c.generated_kind AS generated,c.comment,
   EXISTS(SELECT 1 FROM metadata_constraints k JOIN metadata_constraint_columns a ON a.connection_id=k.connection_id AND a.constraint_id=k.id
     WHERE k.connection_id=c.connection_id AND k.table_id=c.table_id AND k.type='p' AND a.column_position=c.position) AS primary_key
   FROM metadata_columns c WHERE c.connection_id=$1`;
 const constraintSQL = `SELECT k.id::text,k.table_id::text,k.name,k.type,k.definition,k.referenced_table_id::text,
-  CASE WHEN ref.id IS NOT NULL THEN quote_ident(ns.name)||'.'||quote_ident(ref.name) END AS referenced_table,
-  k.on_delete,k.on_update,k.condition,k.validated,k.deferrable,k.initially_deferred,k.comment,
-  CASE WHEN k.validated THEN 'Validated' ELSE 'Not validated' END AS status,
+  CASE WHEN ref.id IS NOT NULL THEN CASE WHEN profile.engine='mssql' THEN '['||replace(ns.name,']',']]')||'].['||replace(ref.name,']',']]')||']' ELSE quote_ident(ns.name)||'.'||quote_ident(ref.name) END END AS referenced_table,
+  k.on_delete,k.on_update,k.condition,k.validated,k.enabled,k.deferrable,k.initially_deferred,k.comment,
+  CASE WHEN profile.engine='mssql' THEN CASE WHEN NOT k.enabled THEN 'Disabled' WHEN k.validated THEN 'Enabled' ELSE 'Enabled / not trusted' END ELSE CASE WHEN k.validated THEN 'Validated' ELSE 'Not validated' END END AS status,
   ARRAY(SELECT c.name FROM metadata_constraint_columns a JOIN metadata_columns c ON c.connection_id=a.connection_id AND c.table_id=a.table_id AND c.position=a.column_position WHERE a.connection_id=k.connection_id AND a.constraint_id=k.id ORDER BY a.ordinal) AS attributes,
   ARRAY(SELECT c.name FROM metadata_constraint_columns a JOIN metadata_columns c ON c.connection_id=a.connection_id AND c.table_id=a.referenced_table_id AND c.position=a.referenced_column_position WHERE a.connection_id=k.connection_id AND a.constraint_id=k.id ORDER BY a.ordinal) AS referenced_attributes
-  FROM metadata_constraints k LEFT JOIN metadata_relations ref ON ref.connection_id=k.connection_id AND ref.id=k.referenced_table_id LEFT JOIN metadata_schemas ns ON ns.connection_id=ref.connection_id AND ns.id=ref.schema_id WHERE k.connection_id=$1`;
+  FROM metadata_constraints k JOIN metadata_connections profile ON profile.id=k.connection_id LEFT JOIN metadata_relations ref ON ref.connection_id=k.connection_id AND ref.id=k.referenced_table_id LEFT JOIN metadata_schemas ns ON ns.connection_id=ref.connection_id AND ns.id=ref.schema_id WHERE k.connection_id=$1`;
 const indexSQL = `SELECT i.id::text,i.table_id::text,i.name,i.method AS type,i.is_unique AS unique,i.is_primary AS primary,i.valid,i.ready,i.condition,i.definition,k.name AS constraint_name,
   ARRAY(SELECT a.expression FROM metadata_index_attributes a WHERE a.connection_id=i.connection_id AND a.index_id=i.id AND NOT a.included ORDER BY a.ordinal) AS attributes,
   ARRAY(SELECT a.expression FROM metadata_index_attributes a WHERE a.connection_id=i.connection_id AND a.index_id=i.id AND a.included ORDER BY a.ordinal) AS included_attributes
@@ -350,7 +364,7 @@ async function readTypes(db, id, roots = null) {
   ).rows;
   const fields = (
     await db.query(
-      `SELECT owner_type_id::text,position,name,type_id::text,formatted_type AS type,nullable,default_expression AS default,identity_kind AS identity,generated_kind AS generated,comment
+      `SELECT owner_type_id::text,position,name,type_id::text,formatted_type AS type,nullable,default_expression AS default,identity_kind AS identity,identity_seed,identity_increment,generated_kind AS generated,comment
     FROM metadata_type_attributes WHERE connection_id=$1 AND owner_type_id=ANY($2::bigint[]) ORDER BY owner_type_id,position`,
       [id, types.map((t) => t.id)],
     )
@@ -365,6 +379,12 @@ async function hydrateRelations(db, id, relations) {
     filter = " AND c.table_id=ANY($2::bigint[])";
   const columns = (
     await db.query(columnSQL + filter + " ORDER BY c.position", [id, ids])
+  ).rows;
+  const physical = (
+    await db.query(
+      `SELECT table_id::text,partition_number,partition_id::text,function_name,scheme,boundary_on_right,lower_bound,upper_bound,filegroup,row_count::text FROM metadata_sqlserver_partitions WHERE connection_id=$1 AND table_id=ANY($2::bigint[]) ORDER BY partition_number`,
+      [id, ids],
+    )
   ).rows;
   const constraints = (
     await db.query(
@@ -435,6 +455,9 @@ async function hydrateRelations(db, id, relations) {
     }
     visit(r, 0);
     r.logical_keys = [];
+    r.sqlserver_partitions = physical
+      .filter((p) => p.table_id === r.id)
+      .map(({ table_id, ...p }) => p);
   }
   applyLogicalKeys({ relations }, await logicalKeys(db, id));
   return relations;
@@ -442,7 +465,7 @@ async function hydrateRelations(db, id, relations) {
 async function snapshotHeader(db, id) {
   return (
     await db.query(
-      `SELECT captured_at,job_id,database_name AS database,username,server_version AS version,database_size::text AS size,schema_count AS schemas,object_count AS objects FROM metadata_snapshots WHERE connection_id=$1`,
+      `SELECT s.captured_at,s.job_id,s.database_name AS database,s.username,s.server_version AS version,s.database_size::text AS size,s.schema_count AS schemas,s.object_count AS objects,p.engine FROM metadata_snapshots s JOIN metadata_connections p ON p.id=s.connection_id WHERE s.connection_id=$1`,
       [id],
     )
   ).rows[0];

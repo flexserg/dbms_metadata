@@ -1,6 +1,8 @@
-# Atlas · PostgreSQL metadata workspace
+# Atlas · Database metadata workspace
 
-A web GUI inspired by DBeaver's database navigator. Node.js serves the interface and API; PostgreSQL stores encrypted connection profiles, the latest complete metadata snapshot in relational tables, and a history of changes. Browsing uses persisted metadata; only refresh and data preview contact the source. This branch requires a clean backing database; legacy snapshots/history are not migrated.
+A web GUI inspired by DBeaver's database navigator for PostgreSQL and Microsoft SQL Server sources. Node.js serves the interface and API; PostgreSQL stores encrypted connection profiles, the latest complete metadata snapshot in relational tables, and a history of changes. Browsing uses persisted metadata; only refresh and data preview contact the source. Existing v1.2 relational storage upgrades additively; older JSON snapshots/history require a fresh database.
+
+See [SQL Server connections, permissions and metadata](docs/mssql.md) for SQL authentication, TLS options and source-specific behavior.
 
 Features: saved/testable connections; schema and relation navigation; columns, generated expressions, primary/foreign/logical keys, constraints, indexes, partitions, view definitions, and function/procedure definitions. Includes manual/scheduled refresh jobs, table change history, filtering, live data preview, owners, estimated row counts, and storage sizes.
 
@@ -30,7 +32,7 @@ export COOKIE_SECURE=false
 npm run dev
 ```
 
-The app creates/upgrades its tables at startup; the storage role must own existing application tables and have CREATE in its default schema. Use a dedicated target role with CONNECT, catalog visibility, and schema USAGE as needed, without write privileges. Data preview additionally requires SELECT on the target relation. Source requests use read-only, repeatable-read transactions, a five-second connection timeout, and an eight-second timeout per statement.
+The app creates/upgrades its tables at startup; the storage role must own existing application tables and have CREATE in its default schema. Use a dedicated target role with CONNECT, catalog visibility, and schema USAGE as needed, without write privileges. Data preview additionally requires SELECT on the target relation. PostgreSQL source requests use read-only, repeatable-read transactions, a five-second connection timeout, and an eight-second timeout per statement. SQL Server uses repeatable-read transactions and source permissions to prohibit writes; see its setup guide above.
 
 ## Snapshots, refresh jobs, and history
 
@@ -101,42 +103,45 @@ The deployment trusts one reverse proxy and requires HTTPS cookies. Expose the a
 
 ### Update an existing k3s server without a registry
 
-This branch uses **storage version 2** and requires a clean database. There is no migration of previous profiles, snapshots or history. Startup refuses an existing JSONB snapshot schema rather than deleting or converting it. A new database can use the same PostgreSQL server/PVC; source databases are unchanged.
+**Upgrading from v1.2 relational storage:** keep the existing application database, PVC, Secret and `APP_KEY`. SQL Server support adds tables/columns automatically at startup and preserves PostgreSQL profiles, snapshots and history. Continue with the build/import commands below.
 
-Create a new application database, then change `DATABASE_URL` in your private environment/Secret configuration to point to it, using the existing PostgreSQL username/password:
+**Upgrading from v1.1 or earlier JSONB snapshot storage:** storage version 2 requires a fresh database. Legacy profiles, snapshots and history are not migrated; startup refuses the old layout. Create a new application database on the existing PostgreSQL server/PVC:
 
 ```sh
 kubectl -n dbms-metadata exec postgres-0 -- createdb -U metadata metadata_v2
 ```
 
-Update the `metadata-secrets` Secret's `DATABASE_URL` to `postgresql://metadata:URL_ENCODED_PASSWORD@postgres:5432/metadata_v2` through your private configuration. Keep the other required keys. Pull this branch (preserving local Service/Ingress edits), build and import a new tag, and update only the app Deployment:
+For this older layout only, update the `metadata-secrets` Secret's `DATABASE_URL` to `postgresql://metadata:URL_ENCODED_PASSWORD@postgres:5432/metadata_v2` through your private configuration. Keep the other required keys and add source connections again after upgrading.
+
+For either upgrade path, pull this branch (preserving local Service/Ingress edits), build and import a new tag, and update only the app Deployment:
 
 ```sh
 git fetch origin
-git switch feat/relational-metadata-storage
+git switch feat/mssql-metadata
 git pull --ff-only
-docker build -t docker.io/library/dbms-metadata:1.2.0 .
-docker save docker.io/library/dbms-metadata:1.2.0 -o /tmp/dbms-metadata-1.2.0.tar
-sudo k3s ctr -n k8s.io images import /tmp/dbms-metadata-1.2.0.tar
-kubectl -n dbms-metadata set image deployment/metadata app=docker.io/library/dbms-metadata:1.2.0
+docker build -t docker.io/library/dbms-metadata:1.3.0 .
+docker save docker.io/library/dbms-metadata:1.3.0 -o /tmp/dbms-metadata-1.3.0.tar
+sudo k3s ctr -n k8s.io images import /tmp/dbms-metadata-1.3.0.tar
+kubectl -n dbms-metadata set image deployment/metadata app=docker.io/library/dbms-metadata:1.3.0
 kubectl -n dbms-metadata rollout status deployment/metadata --timeout=180s
 ```
 
-Keep `imagePullPolicy: Never` and your existing `COOKIE_SECURE=false` setting if serving trusted HTTP. Import the image on every eligible k3s node. Save these choices and the new database URL in your local configuration. Do not reapply unmodified base manifests over customized Service/Ingress ports. Relational tables are initialized automatically at application startup. Add your source connections again and capture their baselines. For local Compose, use a new project/volume or an empty backing database instead of the previous JSONB storage volume.
+Keep `imagePullPolicy: Never` and your existing `COOKIE_SECURE=false` setting if serving trusted HTTP. Import the image on every eligible k3s node. Save these choices in your local configuration. Do not reapply unmodified base manifests over customized Service/Ingress ports. Relational tables are initialized automatically at application startup. For local Compose, existing v1.2 storage can be reused; older JSONB storage needs a new project/volume or empty backing database.
 
 ## Configuration and access
 
-| Variable      | Purpose                                                                                                                     |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| DATABASE_URL  | Required application storage PostgreSQL URL                                                                                 |
-| APP_KEY       | Required 32-byte encryption/signing key, encoded as 64 hex characters                                                       |
-| APP_PASSWORD  | Required shared workspace password, minimum 12 characters                                                                   |
-| PORT          | HTTP port; default 3000                                                                                                     |
-| COOKIE_SECURE | Default true; false enables HTTP cookies and disables forced HTTPS asset upgrades / HSTS; use only on trusted HTTP networks |
-| TRUST_PROXY   | Set 1 only behind a trusted single reverse proxy                                                                            |
-| PG_TARGET_CA  | Optional PEM CA certificate for private target database CAs                                                                 |
+| Variable        | Purpose                                                                                                                     |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| DATABASE_URL    | Required application storage PostgreSQL URL                                                                                 |
+| APP_KEY         | Required 32-byte encryption/signing key, encoded as 64 hex characters                                                       |
+| APP_PASSWORD    | Required shared workspace password, minimum 12 characters                                                                   |
+| PORT            | HTTP port; default 3000                                                                                                     |
+| COOKIE_SECURE   | Default true; false enables HTTP cookies and disables forced HTTPS asset upgrades / HSTS; use only on trusted HTTP networks |
+| TRUST_PROXY     | Set 1 only behind a trusted single reverse proxy                                                                            |
+| PG_TARGET_CA    | Optional PEM CA certificate for private target database CAs                                                                 |
+| MSSQL_TARGET_CA | Optional PEM CA certificate for private SQL Server target CAs                                                               |
 
-Target TLS supports verified certificates/hostnames or explicitly disabled TLS for trusted networks. Storage TLS uses node-postgres connection URL options. `/health/live` checks the process; `/health/ready` checks storage, not every saved target.
+Target TLS supports verified certificates/hostnames or explicitly disabled TLS for trusted networks. SQL Server also offers explicit encrypted connections that trust a self-signed server certificate. Storage TLS uses node-postgres connection URL options. `/health/live` checks the process; `/health/ready` checks storage, not every saved target.
 
 For a trusted HTTP-only k3s deployment, set the app Deployment's `COOKIE_SECURE` value to `"false"`. This allows the browser to load scripts over HTTP and retain the login cookie. Keep the default `"true"` when using HTTPS. After changing the Deployment, wait for its rollout and reload the page. This option does not configure TLS on the server.
 

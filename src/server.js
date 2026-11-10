@@ -4,12 +4,8 @@ import { rateLimit } from "express-rate-limit";
 import pg from "pg";
 import { fileURLToPath } from "node:url";
 import { vault, safeEqual } from "./security.js";
-import {
-  validateConnection,
-  withTarget,
-  overview,
-  preview,
-} from "./metadata.js";
+import { validateConnection } from "./metadata.js";
+import { withTarget, overview, preview } from "./targets.js";
 import { snapshotService } from "./snapshots.js";
 import { readResource, initializeStorage } from "./relational.js";
 import { historyScope, historyFilter } from "./history.js";
@@ -124,7 +120,7 @@ export async function createApp(config = process.env) {
     res.json(
       (
         await pool.query(
-          `SELECT c.id,name,host,port,database,c.username,ssl_mode AS "sslMode",created_at,refresh_interval_minutes,history_retention_days,
+          `SELECT c.id,name,host,port,database,c.username,c.engine,ssl_mode AS "sslMode",created_at,refresh_interval_minutes,history_retention_days,
             s.captured_at AS snapshot_at FROM metadata_connections c LEFT JOIN metadata_snapshots s ON s.connection_id=c.id ORDER BY name`,
         )
       ).rows,
@@ -148,8 +144,8 @@ export async function createApp(config = process.env) {
     }
     await withTarget(c, overview);
     const result = await pool.query(
-      `INSERT INTO metadata_connections(name,host,port,database,username,ssl_mode,password_encrypted)
-      VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+      `INSERT INTO metadata_connections(name,host,port,database,username,ssl_mode,password_encrypted,engine)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
       [
         c.name,
         c.host,
@@ -158,6 +154,7 @@ export async function createApp(config = process.env) {
         c.username,
         c.sslMode,
         crypto.seal(c.password),
+        c.engine,
       ],
     );
     const job = snapshots.kick(
@@ -344,6 +341,11 @@ export async function createApp(config = process.env) {
       42501:
         "Database user does not have permission for the requested data or metadata.",
       57014: "Metadata request timed out.",
+      ELOGIN:
+        "Database authentication failed. Check the username, password and database access.",
+      ETIMEOUT: "Database request timed out.",
+      ESOCKET:
+        "Database connection or TLS negotiation failed. Check the host, port and certificate settings.",
     };
     res
       .status(
@@ -352,6 +354,9 @@ export async function createApp(config = process.env) {
       .json({
         error:
           (error.status ? error.message : null) ||
+          (error.number === 229
+            ? "SQL Server metadata permission denied. Grant VIEW DEFINITION and SELECT on sys.sql_expression_dependencies; preview also requires SELECT on target tables."
+            : null) ||
           messages[error.code] ||
           "Request failed. Check database connectivity, TLS configuration, and server logs.",
       });

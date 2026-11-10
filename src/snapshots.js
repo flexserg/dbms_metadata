@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { withTarget, capture } from "./metadata.js";
+import { withTarget, capture } from "./targets.js";
 import { rememberEdges, pruneHistory } from "./history.js";
 import {
   readSnapshot,
@@ -65,6 +65,7 @@ export function entities(snapshot) {
       constraints,
       indexes,
       partitions,
+      sqlserver_partitions,
       logical_keys,
       size,
       estimated_rows,
@@ -93,6 +94,16 @@ export function entities(snapshot) {
       add("index", i.id, `${r.schema}.${r.name}.${i.name}`, tables, i);
     for (const k of logical_keys)
       add("logical_key", r.id, `${r.schema}.${r.name}.${k.name}`, tables, k);
+    for (const p of sqlserver_partitions || []) {
+      const { row_count, ...value } = p;
+      add(
+        "sqlserver_partition",
+        `${r.id}:${p.partition_number}`,
+        `${r.schema}.${r.name} partition ${p.partition_number}`,
+        tables,
+        value,
+      );
+    }
   }
   const families = new Map();
   for (const p of partitionNodes.values()) {
@@ -156,7 +167,7 @@ export function diffSnapshots(previous, next) {
         ...Object.keys(a.value),
         ...Object.keys(b.value),
       ])) {
-        if (!isDeepStrictEqual(a.value[field], b.value[field]))
+        if (!isDeepStrictEqual(a.value[field] ?? null, b.value[field] ?? null))
           changes.push({
             ...base,
             operation: "modified",
@@ -249,7 +260,7 @@ export function snapshotService(pool, crypto) {
           "UPDATE metadata_refresh_jobs SET status='failed',finished_at=now(),error=$2 WHERE id=$1",
           [
             id,
-            `Refresh failed (${error.code || error.name || "unknown"}). Check source connectivity, permissions and server logs.`,
+            `Refresh failed (${error.code || error.name || "unknown"}${error.number ? "/" + error.number : ""}). Check source connectivity, permissions and server logs.`,
           ],
         );
       }

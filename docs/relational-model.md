@@ -1,6 +1,6 @@
 # Relational metadata storage (version 2)
 
-Current metadata has no JSON/JSONB document columns. It represents one current state per connection, replaced atomically after each successful refresh. Source OIDs are bigint identifiers scoped by `connection_id`, so identical OIDs from different databases cannot collide. Composite foreign keys enforce this scope.
+Current metadata has no JSON/JSONB document columns. It represents one current state per connection, replaced atomically after each successful refresh. Source catalog IDs are bigint identifiers scoped by `connection_id`, so identical IDs from different databases cannot collide. Composite foreign keys enforce this scope. The profile's `engine` selects PostgreSQL or SQL Server; PostgreSQL remains the storage engine.
 
 | Tables                                                  | Purpose                                                                                                     |
 | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
@@ -14,6 +14,7 @@ Current metadata has no JSON/JSONB document columns. It represents one current s
 | `metadata_constraints`, `metadata_constraint_columns`   | Constraints and ordered local/referenced column FKs                                                         |
 | `metadata_indexes`, `metadata_index_attributes`         | Index method/state, linked constraint, ordered expressions and INCLUDE attributes                           |
 | `metadata_partitions`                                   | One row per partition-tree node: own method/key and bounds in parent                                        |
+| `metadata_sqlserver_partitions`                         | Physical SQL Server partitions, functions/schemes, boundary values, filegroups and row estimates             |
 | `metadata_routines`                                     | Schema, function/procedure identity, signature/result/language/definition                                   |
 | `metadata_logical_keys`, `metadata_logical_key_columns` | Platform key configuration and ordered source-column positions                                              |
 | `metadata_refresh_jobs`, `metadata_changes`             | Refresh outcomes and field-level deltas                                                                     |
@@ -30,6 +31,7 @@ erDiagram
   metadata_relations ||--o{ metadata_columns : contains
   metadata_relations ||--o{ metadata_inheritance : parent_or_child
   metadata_relations ||--o| metadata_partitions : partitioning
+  metadata_relations ||--o{ metadata_sqlserver_partitions : physical_partitions
   metadata_relations ||--o{ metadata_constraints : has
   metadata_constraints ||--o{ metadata_constraint_columns : attributes
   metadata_relations ||--o{ metadata_indexes : has
@@ -44,7 +46,9 @@ erDiagram
 
 Primary/foreign keys enforce ownership of local and referenced constraint attributes. Source type and array/domain references use deferred FKs, allowing mutually referencing type dictionaries to be inserted in one transaction. Ordered member tables replace attribute arrays. Index expressions and SQL definitions remain text because they are SQL expressions, not relational associations.
 
-`metadata_types.source_relation_oid` is the raw PostgreSQL class OID associated with a row/composite type; it may identify a system relation outside the user-table subset. Platform logical-key positions intentionally survive source column removal so the UI can report an invalid key and let the operator repair it. They are configuration, not enforced source constraints.
+`metadata_types.source_relation_oid` is the raw PostgreSQL class OID associated with a row/composite type, or the SQL Server table-type object ID; it may identify a relation outside the browsable user-table subset. Platform logical-key positions intentionally survive source column removal so the UI can report an invalid key and let the operator repair it. They are configuration, not enforced source constraints.
+
+SQL Server identity seed/increment and constraint enabled state occupy typed columns. `metadata_sqlserver_partitions` stores physical partition number/ID, function/scheme, boundary direction and values, filegroup and row estimate, with a foreign key to its owning table. PostgreSQL tree partitions continue using `metadata_partitions` and `metadata_inheritance`. SQL Server index IDs combine the table object ID and table-local index ID into a bigint. SQL type expressions and partition boundary literals remain text.
 
 The worker reads relational rows into transient objects to compute deltas, then replaces the current relational rows and records changes in one transaction. This is a complete refresh, not incremental per-row upserts. API read transactions use repeatable-read isolation; they see a complete old or new state. Browsing schemas, relation lists, routines and columns uses SQL filters/joins; table detail only retrieves its relevant type graph. The backing database can be queried directly without JSON extraction.
 
@@ -87,4 +91,4 @@ JOIN metadata_index_attributes a ON (a.connection_id,a.index_id)=(i.connection_i
 ORDER BY i.connection_id,i.name,a.ordinal;
 ```
 
-Use an empty database for this branch. The schema definition is [src/schema.sql](../src/schema.sql); startup refuses legacy `metadata_snapshots.payload` storage and performs no destructive reset or migration.
+The SQL Server extension upgrades v1.2 relational databases additively, retaining existing PostgreSQL profiles and history. The schema definition is [src/schema.sql](../src/schema.sql); startup refuses legacy `metadata_snapshots.payload` storage and performs no destructive reset or legacy-data migration. Only that older JSON layout requires a fresh application database.

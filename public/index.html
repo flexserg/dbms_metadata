@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Atlas · PostgreSQL metadata</title>
+    <title>Atlas · Database metadata</title>
     <link rel="stylesheet" href="/style.css" />
     <link rel="stylesheet" href="/preview.css" />
     <link rel="stylesheet" href="/history.css" />
@@ -15,7 +15,7 @@
         <div class="brand-mark">A</div>
         <p class="eyebrow">ATLAS / DATABASE WORKSPACE</p>
         <h1>Your databases,<br />in perspective.</h1>
-        <p class="muted">Sign in to explore your PostgreSQL metadata.</p>
+        <p class="muted">Sign in to explore your database metadata.</p>
         <label
           >Workspace password<input
             name="password"
@@ -37,7 +37,7 @@
           ><span class="workspace-label">Metadata workspace</span></a
         >
         <div class="top-right">
-          <span class="badge">PostgreSQL</span
+          <span class="badge" id="engine-badge">Databases</span
           ><button id="logout" class="quiet">Sign out ↗</button>
         </div>
       </header>
@@ -64,7 +64,7 @@
           </div>
           <div class="page-heading">
             <div>
-              <p class="eyebrow">POSTGRESQL EXPLORER</p>
+              <p class="eyebrow" id="explorer-engine">DATABASE EXPLORER</p>
               <h1 id="title">Database overview</h1>
               <p id="subtitle" class="muted">
                 A clear view of your database structure.
@@ -117,7 +117,7 @@
       <form id="connection-form">
         <div class="dialog-heading">
           <div>
-            <p class="eyebrow">POSTGRESQL</p>
+            <p class="eyebrow">DATABASE CONNECTION</p>
             <h2>New connection</h2>
           </div>
           <button
@@ -130,8 +130,14 @@
           </button>
         </div>
         <p class="muted">
-          Connect with a database role that can read your catalogs.
+          Connect with a database user that can read your catalogs.
         </p>
+        <label
+          >Database type<select name="engine" id="connection-engine">
+            <option value="postgres">PostgreSQL</option>
+            <option value="mssql">Microsoft SQL Server</option>
+          </select></label
+        >
         <label
           >Connection name<input
             name="name"
@@ -175,6 +181,14 @@
           >TLS mode<select name="sslMode">
             <option value="verify-full">Verify certificate and hostname</option>
             <option value="disable">Disabled (trusted local network)</option>
+            <option
+              value="trust-server-certificate"
+              id="trust-server-certificate"
+              hidden
+              disabled
+            >
+              Encrypt · trust server certificate (SQL Server self-signed)
+            </option>
           </select></label
         >
         <p id="connection-feedback" role="status"></p>
