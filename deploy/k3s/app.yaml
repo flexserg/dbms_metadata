@@ -34,7 +34,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: app
-          image: ghcr.io/flexserg/dbms_metadata:1.0.0
+          image: docker.io/library/dbms-metadata:1.4.0
+          imagePullPolicy: Never
           ports:
             - containerPort: 3000
           env:

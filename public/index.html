@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="/style.css" />
     <link rel="stylesheet" href="/preview.css" />
     <link rel="stylesheet" href="/history.css" />
+    <link rel="stylesheet" href="/connections.css" />
     <script type="module" src="/app.js"></script>
   </head>
   <body>
@@ -129,74 +130,170 @@
             ×
           </button>
         </div>
-        <p class="muted">
-          Connect with a database user that can read your catalogs.
+        <p class="muted" id="connection-step-label">
+          Step 1 of 2 · Choose a database
         </p>
-        <label
-          >Database type<select name="engine" id="connection-engine">
-            <option value="postgres">PostgreSQL</option>
-            <option value="mssql">Microsoft SQL Server</option>
-          </select></label
-        >
-        <label
-          >Connection name<input
-            name="name"
-            placeholder="Production analytics"
-            required
-            maxlength="255"
-        /></label>
-        <div class="form-row">
-          <label
-            >Host<input
-              name="host"
-              placeholder="postgres.example.com"
-              required /></label
-          ><label class="port"
-            >Port<input
-              name="port"
-              type="number"
-              min="1"
-              max="65535"
-              value="5432"
-              required
-          /></label>
-        </div>
-        <label
-          >Database<input name="database" placeholder="analytics" required
-        /></label>
-        <div class="form-row">
-          <label
-            >Username<input
-              name="username"
-              required
-              autocomplete="off" /></label
-          ><label
-            >Password<input
-              name="password"
-              type="password"
-              autocomplete="new-password"
-          /></label>
-        </div>
-        <label
-          >TLS mode<select name="sslMode">
-            <option value="verify-full">Verify certificate and hostname</option>
-            <option value="disable">Disabled (trusted local network)</option>
-            <option
-              value="trust-server-certificate"
-              id="trust-server-certificate"
-              hidden
-              disabled
+        <input
+          type="hidden"
+          name="engine"
+          id="connection-engine"
+          value="postgres"
+        />
+        <section id="database-choice" aria-label="Choose database type">
+          <div class="database-choices">
+            <button
+              type="button"
+              class="database-choice"
+              data-engine="postgres"
             >
-              Encrypt · trust server certificate (SQL Server self-signed)
-            </option>
-          </select></label
-        >
-        <p id="connection-feedback" role="status"></p>
-        <div class="dialog-actions">
-          <button type="button" id="test-connection" class="secondary">
-            Test connection</button
-          ><button type="submit" class="primary">Save connection →</button>
-        </div>
+              <img src="/assets/postgresql.svg" alt="" width="58" height="58" />
+              <strong>PostgreSQL</strong
+              ><span>Tables, types, partitions & routines</span>
+            </button>
+            <button type="button" class="database-choice" data-engine="mssql">
+              <img
+                src="/assets/microsoftsqlserver.svg"
+                alt=""
+                width="58"
+                height="58"
+              />
+              <strong>Microsoft SQL Server</strong
+              ><span>Tables, indexes, partitions & routines</span>
+            </button>
+          </div>
+        </section>
+        <fieldset id="connection-parameters" hidden disabled>
+          <button type="button" id="change-database" class="quiet">
+            ← Change database type
+          </button>
+          <section
+            class="connection-block"
+            aria-labelledby="main-parameters-title"
+          >
+            <h3 id="main-parameters-title">Main parameters</h3>
+            <div class="form-row">
+              <label
+                >Connection name<input
+                  name="name"
+                  placeholder="Production analytics"
+                  required
+                  maxlength="255"
+              /></label>
+              <label
+                >Label<input
+                  name="label"
+                  placeholder="Production / reporting"
+                  maxlength="255"
+              /></label>
+            </div>
+            <div class="form-row">
+              <label
+                >Host<input
+                  name="host"
+                  placeholder="postgres.example.com"
+                  required /></label
+              ><label class="port"
+                >Port<input
+                  name="port"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  value="5432"
+                  required
+              /></label>
+            </div>
+            <label
+              >Database<input name="database" placeholder="analytics" required
+            /></label>
+            <div class="form-row">
+              <label
+                >Username<input
+                  name="username"
+                  required
+                  autocomplete="off" /></label
+              ><label
+                >Password<input
+                  name="password"
+                  type="password"
+                  autocomplete="new-password"
+              /></label>
+            </div>
+          </section>
+          <section
+            class="connection-block"
+            aria-labelledby="ssl-parameters-title"
+          >
+            <h3 id="ssl-parameters-title">SSL parameters</h3>
+            <label
+              >TLS mode<select name="sslMode">
+                <option value="verify-full">
+                  Verify certificate and hostname
+                </option>
+                <option value="disable">
+                  Disabled (trusted local network)
+                </option>
+                <option value="require" data-postgres-tls>
+                  Require encryption (no certificate verification)
+                </option>
+                <option value="verify-ca" data-postgres-tls>
+                  Verify CA certificate (without hostname)
+                </option>
+                <option
+                  value="trust-server-certificate"
+                  id="trust-server-certificate"
+                  hidden
+                  disabled
+                >
+                  Encrypt · trust server certificate (SQL Server self-signed)
+                </option>
+              </select></label
+            >
+            <label
+              >CA certificate (PEM)<textarea
+                name="caCertificate"
+                id="ca-certificate"
+                rows="4"
+                maxlength="65536"
+                placeholder="-----BEGIN CERTIFICATE-----"
+              ></textarea>
+            </label>
+            <label class="certificate-file"
+              >Load CA certificate file<input
+                type="file"
+                id="ca-certificate-file"
+                accept=".pem,.crt,.cer"
+            /></label>
+            <p class="muted">
+              Passwords, certificates and driver properties are stored in
+              OpenBao.
+            </p>
+          </section>
+          <section
+            class="connection-block"
+            aria-labelledby="advanced-parameters-title"
+          >
+            <h3 id="advanced-parameters-title">Advanced parameters</h3>
+            <label class="checkbox-label" id="keepalive-field"
+              ><input type="checkbox" name="keepAlive" checked />Enable TCP
+              keep-alive</label
+            >
+            <p class="muted">
+              Driver properties · Add a supported property by name. Time values
+              are in milliseconds.
+            </p>
+            <div id="driver-properties"></div>
+            <datalist id="driver-property-names"></datalist>
+            <button type="button" id="add-driver-property" class="secondary">
+              + Add driver property
+            </button>
+          </section>
+          <p id="connection-feedback" role="status"></p>
+          <div class="dialog-actions">
+            <button type="button" id="test-connection" class="secondary">
+              Test connection</button
+            ><button type="submit" class="primary">Save connection →</button>
+          </div>
+        </fieldset>
       </form>
     </dialog>
     <dialog id="logical-key-dialog">

@@ -161,7 +161,7 @@ function navigator() {
     ? state.connections
         .map(
           (c) =>
-            `<div class="connection"><div class="connection-row ${c.id === state.connection?.id ? "active" : ""}"><span class="db-icon">▱</span><button data-connect="${esc(c.id)}">${esc(c.name)}</button><button class="delete" data-delete="${esc(c.id)}" aria-label="Delete ${esc(c.name)}">×</button></div>${c.id === state.connection?.id ? state.schemas.map((s) => `<button class="schema-button ${s.name === state.schema ? "active" : ""}" data-schema="${esc(s.name)}"><span>▾ ▦</span>${esc(s.name)} <small class="muted">${s.objects}</small></button>`).join("") : ""}</div>`,
+            `<div class="connection"><div class="connection-row ${c.id === state.connection?.id ? "active" : ""}"><span class="db-icon">▱</span><button data-connect="${esc(c.id)}">${esc(c.name)}${c.label ? `<small class="connection-label">${esc(c.label)}</small>` : ""}</button><button class="delete" data-delete="${esc(c.id)}" aria-label="Delete ${esc(c.name)}">×</button></div>${c.id === state.connection?.id ? state.schemas.map((s) => `<button class="schema-button ${s.name === state.schema ? "active" : ""}" data-schema="${esc(s.name)}"><span>▾ ▦</span>${esc(s.name)} <small class="muted">${s.objects}</small></button>`).join("") : ""}</div>`,
         )
         .join("")
     : '<p class="muted" style="padding:0 10px;font-size:12px;line-height:1.8">Your connections will appear here.<br>Add a database to get started.</p>';
@@ -381,7 +381,7 @@ function render() {
       ],
       filtered(d.indexes).map(
         (r) =>
-          `<tr><td class="object-name">${esc(r.name)}</td><td>${esc(r.type)}</td><td>${esc(r.attributes.join(", "))}</td><td>${esc(r.included_attributes.join(", "))}</td><td>${r.unique ? "Yes" : "No"}</td><td>${esc(r.constraint_name)} · ${r.valid ? "Valid" : "Invalid"} / ${r.ready ? "Ready" : "Not ready"}</td><td class="code">${esc(r.definition)}</td></tr>`,
+          `<tr><td class="object-name">${esc(r.name)}</td><td>${esc(r.type)}</td><td>${esc(r.attributes.join(", "))}</td><td>${esc(r.included_attributes.join(", "))}</td><td>${r.unique ? "Yes" : "No"}${r.nulls_not_distinct === true ? " · NULLs not distinct" : ""}</td><td>${esc(r.constraint_name)} · ${r.valid ? "Valid" : "Invalid"} / ${r.ready ? "Ready" : "Not ready"}</td><td class="code">${esc(r.definition)}</td></tr>`,
       ),
     );
   else if (state.tab === "Keys")
@@ -556,10 +556,22 @@ async function init() {
   render();
   if (state.connections.length) await loadConnection(state.connections[0].id);
 }
-function openDialog() {
-  configureEngine();
+let driverDefinitions = {};
+async function openDialog() {
+  $("#connection-form").reset();
+  $("#driver-properties").replaceChildren();
+  $("#connection-parameters").hidden = true;
+  $("#connection-parameters").disabled = true;
+  $("#database-choice").hidden = false;
+  $("#connection-step-label").textContent = "Step 1 of 2 · Choose a database";
   $("#connection-feedback").textContent = "";
   $("#connection-dialog").showModal();
+  try {
+    driverDefinitions = await api("/connection-options");
+    updatePropertySuggestions();
+  } catch (error) {
+    notice(error.message);
+  }
 }
 function configureEngine() {
   const mssql = $("#connection-engine").value === "mssql",
@@ -569,10 +581,65 @@ function configureEngine() {
     port.value = mssql ? "1433" : "5432";
   $("#trust-server-certificate").hidden = !mssql;
   $("#trust-server-certificate").disabled = !mssql;
-  if (!mssql && tls.value === "trust-server-certificate")
+  for (const option of document.querySelectorAll("[data-postgres-tls]")) {
+    option.hidden = mssql;
+    option.disabled = mssql;
+  }
+  $("#keepalive-field").hidden = mssql;
+  if (
+    (!mssql && tls.value === "trust-server-certificate") ||
+    (mssql && ["require", "verify-ca"].includes(tls.value))
+  )
     tls.value = "verify-full";
+  updatePropertySuggestions();
 }
-$("#connection-engine").onchange = configureEngine;
+function updatePropertySuggestions() {
+  const definitions = driverDefinitions[$("#connection-engine").value] || {};
+  $("#driver-property-names").innerHTML = Object.entries(definitions)
+    .map(
+      ([name, spec]) =>
+        `<option value="${esc(name)}">${esc(spec.type)}${spec.min === undefined ? "" : ` · ${spec.min}–${spec.max}`}</option>`,
+    )
+    .join("");
+}
+for (const button of document.querySelectorAll("[data-engine]"))
+  button.onclick = () => {
+    $("#connection-engine").value = button.dataset.engine;
+    $("#database-choice").hidden = true;
+    $("#connection-parameters").hidden = false;
+    $("#connection-parameters").disabled = false;
+    $("#connection-step-label").textContent =
+      `Step 2 of 2 · ${engineLabel(button.dataset.engine)}`;
+    $("#driver-properties").replaceChildren();
+    configureEngine();
+    $("#connection-form [name=name]").focus();
+  };
+$("#change-database").onclick = () => {
+  $("#connection-parameters").hidden = true;
+  $("#connection-parameters").disabled = true;
+  $("#database-choice").hidden = false;
+  $("#connection-step-label").textContent = "Step 1 of 2 · Choose a database";
+};
+$("#add-driver-property").onclick = () => {
+  const row = document.createElement("div");
+  row.className = "driver-property";
+  row.innerHTML =
+    '<input aria-label="Property name" list="driver-property-names" placeholder="Property name" maxlength="100" required /><input aria-label="Property value" placeholder="Value" maxlength="2048" required /><button type="button" class="quiet" aria-label="Remove driver property">×</button>';
+  row.querySelector("button").onclick = () => row.remove();
+  $("#driver-properties").append(row);
+  row.querySelector("input").focus();
+};
+$("#ca-certificate-file").onchange = async (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+  if (file.size > 65536) {
+    $("#connection-feedback").textContent =
+      "CA certificate must be at most 64 KiB";
+    event.target.value = "";
+    return;
+  }
+  $("#ca-certificate").value = await file.text();
+};
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   try {
@@ -606,9 +673,23 @@ async function submitConnection(save) {
   buttons.forEach((b) => (b.disabled = true));
   $("#connection-feedback").textContent = "Connecting…";
   try {
+    const body = Object.fromEntries(new FormData(form));
+    body.keepAlive = form.elements.keepAlive.checked;
+    body.driverProperties = {};
+    for (const row of form.querySelectorAll(".driver-property")) {
+      const [name, value] = [...row.querySelectorAll("input")].map(
+        (input) => input.value,
+      );
+      if (
+        Object.hasOwn(body.driverProperties, name) ||
+        !Object.hasOwn(driverDefinitions[body.engine] || {}, name)
+      )
+        throw new Error(`Duplicate or unsupported driver property: ${name}`);
+      body.driverProperties[name] = value;
+    }
     const result = await api("/connections" + (save ? "" : "/test"), {
       method: "POST",
-      body: Object.fromEntries(new FormData(form)),
+      body,
     });
     if (save) {
       state.connections = await api("/connections");
@@ -627,6 +708,7 @@ async function submitConnection(save) {
 }
 $("#connection-form").onsubmit = (e) => {
   e.preventDefault();
+  if ($("#connection-parameters").hidden) return;
   submitConnection(true);
 };
 $("#test-connection").onclick = () => submitConnection(false);

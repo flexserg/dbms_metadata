@@ -48,6 +48,15 @@ test(
       assert.fail("Refresh timed out");
     }
     try {
+      assert.equal(
+        await withTarget(
+          fixture.connection,
+          async (client) =>
+            (await client.query("SELECT APP_NAME() AS app_name")).rows[0]
+              .app_name,
+        ),
+        "Atlas SQL fixture",
+      );
       cookie = (
         await request("/login", "POST", { password: "integration-password" })
       ).cookie.split(";")[0];

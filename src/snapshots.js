@@ -189,7 +189,7 @@ async function saveChanges(db, job, changes) {
     [job.id, job.connection_id, JSON.stringify(changes)],
   );
 }
-export function snapshotService(pool, crypto) {
+export function snapshotService(pool, secrets) {
   async function enqueue(connectionId, trigger = "manual") {
     return (
       await pool.query(
@@ -232,13 +232,13 @@ export function snapshotService(pool, crypto) {
         [id],
       );
       try {
-        const c = (
+        const profile = (
           await db.query(
-            'SELECT *,ssl_mode AS "sslMode" FROM metadata_connections WHERE id=$1',
+            'SELECT *,ssl_mode AS "sslMode",keep_alive AS "keepAlive" FROM metadata_connections WHERE id=$1',
             [connectionId],
           )
         ).rows[0];
-        c.password = crypto.open(c.password_encrypted);
+        const c = await secrets.resolve(profile);
         const next = await withTarget(c, capture);
         await db.query("BEGIN");
         const keys = await logicalKeys(db, connectionId);

@@ -20,8 +20,8 @@ test("SQL Server connection and metadata use the shared workspace", async ({
       .click();
     const form = page.getByRole("dialog");
     await form
-      .getByRole("combobox", { name: "Database type", exact: true })
-      .selectOption("mssql");
+      .getByRole("button", { name: "Microsoft SQL Server", exact: false })
+      .click();
     await expect(form.getByLabel("Port", { exact: true })).toHaveValue("1433");
     await form.getByLabel("Connection name").fill("MSSQL browser");
     await form

@@ -1,4 +1,5 @@
 import sql from "mssql";
+import { driverProperties } from "./connection-options.js";
 export const quote = (name) => "[" + name.replaceAll("]", "]]") + "]";
 export function typeName(column, types) {
   const t = types.get(String(column.user_type_id));
@@ -18,23 +19,28 @@ export function typeName(column, types) {
   return n;
 }
 export async function withTarget(connection, action) {
+  const properties = driverProperties("mssql", connection.driverProperties);
+  const ca = connection.caCertificate || process.env.MSSQL_TARGET_CA;
   const pool = new sql.ConnectionPool({
     server: connection.host,
     port: connection.port,
     database: connection.database,
     user: connection.username,
     password: connection.password,
-    connectionTimeout: 5000,
-    requestTimeout: 10000,
+    connectionTimeout: properties.connectionTimeout ?? 5000,
+    requestTimeout: properties.requestTimeout ?? 10000,
     pool: { max: 1, min: 0, idleTimeoutMillis: 1000 },
     options: {
+      appName: properties.appName ?? "dbms_metadata",
+      ...(properties.packetSize === undefined
+        ? {}
+        : { packetSize: properties.packetSize }),
+      useUTC: properties.useUTC ?? true,
       encrypt: connection.sslMode !== "disable",
       trustServerCertificate: connection.sslMode === "trust-server-certificate",
       readOnlyIntent: true,
       abortTransactionOnError: true,
-      ...(process.env.MSSQL_TARGET_CA
-        ? { cryptoCredentialsDetails: { ca: process.env.MSSQL_TARGET_CA } }
-        : {}),
+      ...(ca ? { cryptoCredentialsDetails: { ca } } : {}),
     },
   });
   pool.on("error", () => {});

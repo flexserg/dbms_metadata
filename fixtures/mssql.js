@@ -92,6 +92,7 @@ export async function mssqlFixture() {
         username: login,
         password: "Metadata_Reader_2026!",
         sslMode: "trust-server-certificate",
+        driverProperties: { appName: "Atlas SQL fixture", useUTC: false },
       },
     };
   } catch (e) {

@@ -220,6 +220,56 @@ test("operator connects, browses metadata, filters, and signs out", async ({
     .getByRole("button", { name: "New connection", exact: true })
     .click();
   const dialog = page.getByRole("dialog");
+  await expect(dialog.getByLabel("Connection name")).not.toBeVisible();
+  await expect(dialog.locator("img")).toHaveCount(2);
+  expect(
+    await dialog
+      .locator("img")
+      .evaluateAll((images) =>
+        images.every((image) => image.complete && image.naturalWidth > 0),
+      ),
+  ).toBe(true);
+  await dialog
+    .getByRole("button", { name: "Microsoft SQL Server", exact: false })
+    .click();
+  await expect(dialog.getByLabel("Port", { exact: true })).toHaveValue("1433");
+  await dialog
+    .getByRole("button", { name: "Change database type", exact: false })
+    .click();
+  await dialog
+    .getByRole("button", { name: "PostgreSQL", exact: false })
+    .click();
+  await expect(dialog.getByLabel("Port", { exact: true })).toHaveValue("5432");
+  for (const name of [
+    "Main parameters",
+    "SSL parameters",
+    "Advanced parameters",
+  ])
+    await expect(
+      dialog.getByRole("heading", { name, exact: true }),
+    ).toBeVisible();
+  await dialog.getByLabel("Label", { exact: true }).fill("Browser reporting");
+  await dialog.getByLabel("Enable TCP keep-alive").uncheck();
+  await dialog
+    .getByRole("button", { name: "Add driver property", exact: false })
+    .click();
+  await dialog
+    .getByLabel("Property name", { exact: true })
+    .fill("application_name");
+  await dialog
+    .getByLabel("Property value", { exact: true })
+    .fill("Atlas browser");
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: "test-results/connection-wizard-mobile.png",
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await dialog.getByLabel("Connection name").fill("Browser fixture");
   await dialog.getByLabel("Host", { exact: true }).fill("127.0.0.1");
   await dialog.getByLabel("Port", { exact: true }).fill("55432");
@@ -235,6 +285,9 @@ test("operator connects, browses metadata, filters, and signs out", async ({
   );
   await dialog.getByRole("button", { name: "Save connection" }).click();
   await expect(dialog).not.toBeVisible();
+  await expect(
+    page.locator(".connection-label", { hasText: "Browser reporting" }),
+  ).toBeVisible();
   await page.locator('[data-schema="fixture"]').click();
   await page.getByRole("cell", { name: "child", exact: false }).first().click();
   await expect(
