@@ -8,13 +8,34 @@ services:
       APP_KEY: ${APP_KEY:?Set APP_KEY to 64 hex characters}
       APP_PASSWORD: ${APP_PASSWORD:?Set APP_PASSWORD to at least 12 characters}
       COOKIE_SECURE: "false"
+      BAO_ADDR: http://openbao:8200
+      BAO_ALLOW_HTTP: "true"
+      BAO_TOKEN_FILE: /run/secrets/openbao-token
+    secrets:
+      - openbao-token
     depends_on:
       postgres:
+        condition: service_healthy
+      openbao:
         condition: service_healthy
     restart: unless-stopped
     read_only: true
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
+  openbao:
+    image: ghcr.io/openbao/openbao:2.4.4
+    command: ["server", "-config=/openbao/config/config.hcl"]
+    environment:
+      BAO_ADDR: http://127.0.0.1:8200
+    volumes:
+      - openbao-data:/openbao/data
+      - ./deploy/openbao/compose.hcl:/openbao/config/config.hcl:ro
+    healthcheck:
+      test: ["CMD", "bao", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
   postgres:
     image: postgres:17-bookworm
     environment:
@@ -31,3 +52,7 @@ services:
     restart: unless-stopped
 volumes:
   postgres-data:
+  openbao-data:
+secrets:
+  openbao-token:
+    file: ${BAO_TOKEN_FILE:-./.secrets/openbao-token}

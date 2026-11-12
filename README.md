@@ -1,6 +1,8 @@
 # Atlas · Database metadata workspace
 
-A web GUI inspired by DBeaver's database navigator for PostgreSQL and Microsoft SQL Server sources. Node.js serves the interface and API; PostgreSQL stores encrypted connection profiles, the latest complete metadata snapshot in relational tables, and a history of changes. Browsing uses persisted metadata; only refresh and data preview contact the source. Existing v1.2 relational storage upgrades additively; older JSON snapshots/history require a fresh database.
+A web GUI inspired by DBeaver's database navigator for PostgreSQL and Microsoft SQL Server sources. Node.js serves the interface and API; PostgreSQL stores connection settings, the latest complete metadata snapshot in relational tables, and a history of changes. OpenBao stores source passwords, CA certificates and driver properties. Browsing uses persisted metadata; only refresh and data preview contact the source.
+
+**Version 1.4 requires OpenBao.** Follow [OpenBao setup and k3s upgrade](docs/openbao.md) before replacing an existing app. Existing v1.2/v1.3 relational snapshots/history are preserved and encrypted passwords are transferred automatically. Older JSON snapshots/history require a fresh database. See [the two-step connection wizard and bulk collector](docs/connections.md).
 
 See [SQL Server connections, permissions and metadata](docs/mssql.md) for SQL authentication, TLS options and source-specific behavior.
 
@@ -10,12 +12,14 @@ This release explores metadata. It has no SQL editor, row editor, or full table 
 
 ## Run locally
 
-Requires Docker Compose, or Node.js 22+ and PostgreSQL 14+ (tested on Node 24 / PostgreSQL 17).
+Requires Docker Compose, or Node.js 22+, PostgreSQL 14+ and initialized OpenBao KV v2 (tested on Node 24 / PostgreSQL 17 / OpenBao 2.4.4).
 
 ```sh
 cp .env.example .env
 # Edit .env with random passwords and APP_KEY (openssl rand -hex 32).
-docker compose up --build -d
+# First initialize/unseal OpenBao and create the scoped app token:
+# follow docs/openbao.md#docker-compose, then:
+docker compose up --build -d app
 docker compose logs -f app
 ```
 
@@ -29,6 +33,9 @@ export DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/metadata'
 export APP_KEY='YOUR_64_HEX_CHARACTERS'
 export APP_PASSWORD='YOUR_LONG_WORKSPACE_PASSWORD'
 export COOKIE_SECURE=false
+export BAO_ADDR='https://YOUR_OPENBAO_HOST:8200'
+export BAO_CA_FILE='/secure/openbao/ca.crt'
+export BAO_TOKEN_FILE='/secure/openbao/atlas-token'
 npm run dev
 ```
 
@@ -74,13 +81,13 @@ Authenticated API endpoints (under `/api/connections/:id`): `POST /refresh` retu
 
 ## Deploy to k3s
 
-The manifests include a PostgreSQL StatefulSet with a 5 GiB `local-path` PVC, an app Deployment, internal Services, health probes, and resource limits. Local-path storage is node-local and this database is not highly available. Use managed PostgreSQL and backups if higher availability is needed.
+The manifests include PostgreSQL and OpenBao StatefulSets, an app Deployment, internal Services, health probes, and resource limits. Local-path storage is node-local and these single-instance services are not highly available. First complete [OpenBao setup](docs/openbao.md#k3s-setup), including its TLS certificate, initialization, unseal and Kubernetes authentication. Use managed or replicated services and backups if higher availability is needed.
 
-1. Build and push an image, then set its name in `deploy/k3s/app.yaml`. The default GHCR image is an example; this project does not automatically publish it. Private registries require an imagePullSecret.
+1. The default Deployment uses the locally imported `docker.io/library/dbms-metadata:1.4.0` image with `imagePullPolicy: Never`, matching a k3s server without a registry; use the build/import commands in the upgrade guide. If using a registry instead, build/push an image, set its name in `deploy/k3s/app.yaml` and change `imagePullPolicy` to `IfNotPresent`. Private registries require an imagePullSecret.
 
    ```sh
-   docker build -t YOUR_REGISTRY/dbms-metadata:1.0.0 .
-   docker push YOUR_REGISTRY/dbms-metadata:1.0.0
+   docker build -t YOUR_REGISTRY/dbms-metadata:1.4.0 .
+   docker push YOUR_REGISTRY/dbms-metadata:1.4.0
    ```
 
 2. Prepare a private env file **outside Git** with `POSTGRES_PASSWORD`, `DATABASE_URL`, `APP_KEY`, and `APP_PASSWORD`. Use `postgresql://metadata:URL_ENCODED_PASSWORD@postgres:5432/metadata` as DATABASE_URL, with the same password as POSTGRES_PASSWORD.
@@ -99,11 +106,11 @@ The manifests include a PostgreSQL StatefulSet with a 5 GiB `local-path` PVC, an
    kubectl apply -f deploy/k3s/ingress.example.yaml
    ```
 
-The deployment trusts one reverse proxy and requires HTTPS cookies. Expose the app through that ingress and restrict direct Service access. The app runs non-root with a read-only root filesystem and dropped capabilities. PostgreSQL runs as UID 999 with a writable PVC. Protect Secrets with RBAC and encryption at rest. Back up the storage database and APP_KEY together: losing or changing the key makes saved passwords unreadable.
+Prepare and authorize OpenBao using [its setup guide](docs/openbao.md#k3s-setup) before applying the app. The deployment trusts one reverse proxy and requires HTTPS cookies. Expose the app through that ingress and restrict direct Service access. The app runs non-root with a read-only root filesystem and dropped capabilities. PostgreSQL runs as UID 999 with a writable PVC. Protect Secrets with RBAC and encryption at rest. Back up PostgreSQL, OpenBao Raft storage and their required key material together.
 
 ### Update an existing k3s server without a registry
 
-**Upgrading from v1.2 relational storage:** keep the existing application database, PVC, Secret and `APP_KEY`. SQL Server support adds tables/columns automatically at startup and preserves PostgreSQL profiles, snapshots and history. Continue with the build/import commands below.
+For **v1.4**, use the complete [OpenBao preparation, image build/import and upgrade sequence](docs/openbao.md#upgrade-an-existing-app). Keep the existing database, PVC, Secret and `APP_KEY` when upgrading from v1.2/v1.3 relational storage. Stop old replicas before credential migration; do not mix old/new workers.
 
 **Upgrading from v1.1 or earlier JSONB snapshot storage:** storage version 2 requires a fresh database. Legacy profiles, snapshots and history are not migrated; startup refuses the old layout. Create a new application database on the existing PostgreSQL server/PVC:
 
@@ -113,20 +120,7 @@ kubectl -n dbms-metadata exec postgres-0 -- createdb -U metadata metadata_v2
 
 For this older layout only, update the `metadata-secrets` Secret's `DATABASE_URL` to `postgresql://metadata:URL_ENCODED_PASSWORD@postgres:5432/metadata_v2` through your private configuration. Keep the other required keys and add source connections again after upgrading.
 
-For either upgrade path, pull this branch (preserving local Service/Ingress edits), build and import a new tag, and update only the app Deployment:
-
-```sh
-git fetch origin
-git switch feat/mssql-metadata
-git pull --ff-only
-docker build -t docker.io/library/dbms-metadata:1.3.0 .
-docker save docker.io/library/dbms-metadata:1.3.0 -o /tmp/dbms-metadata-1.3.0.tar
-sudo k3s ctr -n k8s.io images import /tmp/dbms-metadata-1.3.0.tar
-kubectl -n dbms-metadata set image deployment/metadata app=docker.io/library/dbms-metadata:1.3.0
-kubectl -n dbms-metadata rollout status deployment/metadata --timeout=180s
-```
-
-Keep `imagePullPolicy: Never` and your existing `COOKIE_SECURE=false` setting if serving trusted HTTP. Import the image on every eligible k3s node. Save these choices in your local configuration. Do not reapply unmodified base manifests over customized Service/Ingress ports. Relational tables are initialized automatically at application startup. For local Compose, existing v1.2 storage can be reused; older JSONB storage needs a new project/volume or empty backing database.
+Keep `imagePullPolicy: Never` and your existing `COOKIE_SECURE=false` setting if serving trusted HTTP. Import the new image on every eligible k3s node. Do not reapply unmodified base manifests over customized Service/Ingress ports. For local Compose, existing relational storage can be reused; older JSONB storage needs a new project/volume or empty backing database.
 
 ## Configuration and access
 
@@ -140,18 +134,21 @@ Keep `imagePullPolicy: Never` and your existing `COOKIE_SECURE=false` setting if
 | TRUST_PROXY     | Set 1 only behind a trusted single reverse proxy                                                                            |
 | PG_TARGET_CA    | Optional PEM CA certificate for private target database CAs                                                                 |
 | MSSQL_TARGET_CA | Optional PEM CA certificate for private SQL Server target CAs                                                               |
+| BAO_ADDR        | Required OpenBao origin; see [authentication and TLS configuration](docs/openbao.md#configuration-and-failure-behavior)     |
 
-Target TLS supports verified certificates/hostnames or explicitly disabled TLS for trusted networks. SQL Server also offers explicit encrypted connections that trust a self-signed server certificate. Storage TLS uses node-postgres connection URL options. `/health/live` checks the process; `/health/ready` checks storage, not every saved target.
+Configure per-connection CA bundles and SSL modes in the wizard. The older `PG_TARGET_CA`/`MSSQL_TARGET_CA` variables remain defaults and are copied into OpenBao on migration/new saves. Storage TLS uses node-postgres connection URL options. `/health/live` checks the process; `/health/ready` checks PostgreSQL and OpenBao, not every source.
 
 For a trusted HTTP-only k3s deployment, set the app Deployment's `COOKIE_SECURE` value to `"false"`. This allows the browser to load scripts over HTTP and retain the login cookie. Keep the default `"true"` when using HTTPS. After changing the Deployment, wait for its rollout and reload the page. This option does not configure TLS on the server.
 
-All signed-in operators share access to all saved connections. Use an organizational access gateway and cluster egress policies to constrain target networks. Connection passwords use AES-256-GCM. Session cookies are HttpOnly, SameSite=Strict, and last eight hours. Password rotation invalidates existing sessions; logout removes the browser cookie but copied tokens remain valid until expiration or rotation. Login throttling is per app process. Profiles can be removed and recreated when their settings change.
+All signed-in operators share access to all saved connections. Use an organizational access gateway and cluster egress policies to constrain target networks. Source secrets use OpenBao's encrypted storage; `APP_KEY` signs sessions and decrypts legacy passwords during migration. Session cookies are HttpOnly, SameSite=Strict, and last eight hours. Workspace password rotation invalidates existing sessions; logout removes the browser cookie but copied tokens remain valid until expiration or rotation. Login throttling is per app process. Profiles can be removed and recreated when their settings change.
 
 ## Tests
 
 ```sh
 npm ci
 npm test
+# Start disposable OpenBao and export BAO_ADDR/BAO_ALLOW_HTTP/BAO_TOKEN
+# using docs/openbao.md#disposable-tests before integration/browser tests.
 # Use a disposable PostgreSQL database; fixtures remain for manual exploration.
 TEST_DATABASE_URL=postgresql://metadata:integration-password@127.0.0.1:55432/metadata npm run test:integration
 # Run after integration tests to reuse the catalog fixtures:

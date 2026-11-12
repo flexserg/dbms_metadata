@@ -44,7 +44,7 @@ Preview opens immediately with a loading indicator and uses the shared compact g
 
 Existing **v1.2 relational storage upgrades additively at startup**. Keep its database, PVC, Secret and `APP_KEY`; existing PostgreSQL profiles and history remain available. New profile engine fields default to PostgreSQL. The older v1.1 JSON snapshot layout still requires a fresh application database, as described in the main README.
 
-Follow the [local build/import commands](../README.md#update-an-existing-k3s-server-without-a-registry) for branch `feat/mssql-metadata` and image `1.3.0`. Preserve customized Service/Ingress ports, `imagePullPolicy: Never` and your HTTP/HTTPS cookie setting. Import the image on every eligible node, update only the app image and wait for rollout. Then add a SQL Server profile in the workspace. No change to the source database schema is required.
+Version **1.4 requires OpenBao** for credentials, CA certificates and custom driver properties. Follow the [OpenBao setup and local build/import upgrade](openbao.md) for branch `feat/bulk-connections-openbao` and image `1.4.0`. Preserve customized Service/Ingress ports, `imagePullPolicy: Never` and your HTTP/HTTPS cookie setting. Then add a SQL Server profile in the workspace. No change to the source database schema is required.
 
 ## Development tests
 
@@ -58,6 +58,7 @@ docker run -d --name metadata-mssql-test --memory=4g \
   -p 127.0.0.1:51433:1433 mcr.microsoft.com/mssql/server:2022-latest
 # Wait until SQL Server reports it is ready for client connections.
 # Also start a disposable PostgreSQL backing database on port 55432.
+# Start disposable OpenBao and export its variables as shown in docs/openbao.md.
 npm run test:mssql
 MSSQL_INTEGRATION=1 npx playwright test e2e/mssql.spec.js
 ```

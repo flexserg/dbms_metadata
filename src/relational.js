@@ -205,6 +205,7 @@ export async function writeSnapshot(db, id, job, s) {
         is_primary: i.primary,
         valid: i.valid,
         ready: i.ready,
+        nulls_not_distinct: i.nulls_not_distinct ?? null,
         condition: i.condition,
         definition: i.definition,
         constraint_id:
@@ -343,7 +344,7 @@ const constraintSQL = `SELECT k.id::text,k.table_id::text,k.name,k.type,k.defini
   ARRAY(SELECT c.name FROM metadata_constraint_columns a JOIN metadata_columns c ON c.connection_id=a.connection_id AND c.table_id=a.table_id AND c.position=a.column_position WHERE a.connection_id=k.connection_id AND a.constraint_id=k.id ORDER BY a.ordinal) AS attributes,
   ARRAY(SELECT c.name FROM metadata_constraint_columns a JOIN metadata_columns c ON c.connection_id=a.connection_id AND c.table_id=a.referenced_table_id AND c.position=a.referenced_column_position WHERE a.connection_id=k.connection_id AND a.constraint_id=k.id ORDER BY a.ordinal) AS referenced_attributes
   FROM metadata_constraints k JOIN metadata_connections profile ON profile.id=k.connection_id LEFT JOIN metadata_relations ref ON ref.connection_id=k.connection_id AND ref.id=k.referenced_table_id LEFT JOIN metadata_schemas ns ON ns.connection_id=ref.connection_id AND ns.id=ref.schema_id WHERE k.connection_id=$1`;
-const indexSQL = `SELECT i.id::text,i.table_id::text,i.name,i.method AS type,i.is_unique AS unique,i.is_primary AS primary,i.valid,i.ready,i.condition,i.definition,k.name AS constraint_name,
+const indexSQL = `SELECT i.id::text,i.table_id::text,i.name,i.method AS type,i.is_unique AS unique,i.is_primary AS primary,i.valid,i.ready,i.nulls_not_distinct,i.condition,i.definition,k.name AS constraint_name,
   ARRAY(SELECT a.expression FROM metadata_index_attributes a WHERE a.connection_id=i.connection_id AND a.index_id=i.id AND NOT a.included ORDER BY a.ordinal) AS attributes,
   ARRAY(SELECT a.expression FROM metadata_index_attributes a WHERE a.connection_id=i.connection_id AND a.index_id=i.id AND a.included ORDER BY a.ordinal) AS included_attributes
   FROM metadata_indexes i LEFT JOIN metadata_constraints k ON k.connection_id=i.connection_id AND k.id=i.constraint_id WHERE i.connection_id=$1`;

@@ -1,0 +1,142 @@
+#connection-dialog {
+  width: min(720px, calc(100% - 24px));
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+}
+#connection-parameters {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.database-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin: 28px 0 12px;
+}
+.database-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 30px 18px;
+  border: 1px solid #dce7e6;
+  background: #fbfdfc;
+  color: #314d59;
+  min-width: 0;
+}
+.database-choice:hover,
+.database-choice:focus-visible {
+  border-color: #19766d;
+  background: #eff8f5;
+}
+.database-choice span {
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: #788e95;
+}
+.database-choice img {
+  object-fit: contain;
+}
+.connection-block {
+  border: 1px solid #e2e9ec;
+  border-radius: 8px;
+  margin-top: 18px;
+  padding: 18px;
+}
+.connection-block h3 {
+  font-size: 13px;
+  margin: 0 0 18px;
+  color: #466b73;
+}
+.connection-block .muted {
+  margin-bottom: 14px;
+}
+.connection-block label:last-child {
+  margin-bottom: 0;
+}
+.connection-block textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px;
+  border: 1px solid #dce5e5;
+  border-radius: 5px;
+  margin-top: 8px;
+  resize: vertical;
+  font:
+    11px/1.5 ui-monospace,
+    monospace;
+  color: #314d59;
+}
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.checkbox-label input {
+  width: auto;
+  margin: 0;
+}
+.driver-property {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.driver-property input {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+}
+.driver-property button {
+  padding: 8px;
+}
+.certificate-file input {
+  font-size: 11px;
+  max-width: 100%;
+}
+.connection-label {
+  display: block;
+  color: #7b9298;
+  font-weight: 400;
+  font-size: 10px;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 600px) {
+  #connection-dialog {
+    padding: 20px;
+  }
+  .database-choices {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .database-choice {
+    padding: 20px;
+    gap: 10px;
+  }
+  .connection-block {
+    padding: 14px;
+  }
+  #connection-parameters .form-row {
+    flex-wrap: wrap;
+  }
+  #connection-parameters .form-row label {
+    flex: 1 1 160px;
+  }
+  #connection-parameters .form-row .port {
+    flex: 0 0 90px;
+  }
+  .driver-property {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .driver-property input:first-child {
+    grid-column: 1/-1;
+  }
+}

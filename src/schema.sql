@@ -1,6 +1,10 @@
 ALTER TABLE metadata_connections ADD COLUMN IF NOT EXISTS refresh_interval_minutes integer NOT NULL DEFAULT 0 CHECK(refresh_interval_minutes BETWEEN 0 AND 10080);
 ALTER TABLE metadata_connections ADD COLUMN IF NOT EXISTS history_retention_days integer NOT NULL DEFAULT 0 CHECK(history_retention_days BETWEEN 0 AND 36500);
 ALTER TABLE metadata_connections ADD COLUMN IF NOT EXISTS engine text NOT NULL DEFAULT 'postgres' CHECK(engine IN ('postgres','mssql'));
+ALTER TABLE metadata_connections ALTER COLUMN password_encrypted DROP NOT NULL;
+ALTER TABLE metadata_connections ADD COLUMN IF NOT EXISTS secret_ref text UNIQUE;
+ALTER TABLE metadata_connections ADD COLUMN IF NOT EXISTS label text NOT NULL DEFAULT '';
+ALTER TABLE metadata_connections ADD COLUMN IF NOT EXISTS keep_alive boolean NOT NULL DEFAULT true;
 CREATE TABLE IF NOT EXISTS metadata_storage_version(version integer PRIMARY KEY CHECK(version=2));
 INSERT INTO metadata_storage_version VALUES(2) ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS metadata_refresh_jobs(
@@ -101,6 +105,7 @@ ALTER TABLE metadata_columns ADD COLUMN IF NOT EXISTS identity_increment text;
 ALTER TABLE metadata_type_attributes ADD COLUMN IF NOT EXISTS identity_seed text;
 ALTER TABLE metadata_type_attributes ADD COLUMN IF NOT EXISTS identity_increment text;
 ALTER TABLE metadata_constraints ADD COLUMN IF NOT EXISTS enabled boolean NOT NULL DEFAULT true;
+ALTER TABLE metadata_indexes ADD COLUMN IF NOT EXISTS nulls_not_distinct boolean;
 CREATE TABLE IF NOT EXISTS metadata_sqlserver_partitions(
   connection_id uuid NOT NULL,table_id bigint NOT NULL,partition_number integer NOT NULL CHECK(partition_number>0),partition_id bigint NOT NULL,
   function_name text NOT NULL,scheme text NOT NULL,boundary_on_right boolean NOT NULL,lower_bound text,upper_bound text,filegroup text,row_count bigint NOT NULL,

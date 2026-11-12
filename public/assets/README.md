@@ -1,0 +1,1 @@
+Database marks are from [Simple Icons 11.15.0](https://github.com/simple-icons/simple-icons/tree/11.15.0/icons), distributed under [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/). PostgreSQL and Microsoft SQL Server names and marks belong to their respective owners. The local SVG files avoid third-party requests from the connection dialog.

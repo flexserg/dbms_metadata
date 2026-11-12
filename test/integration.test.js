@@ -630,7 +630,7 @@ test(
 );
 
 test(
-  "PostgreSQL-backed API authenticates, persists encrypted connections and reads real metadata",
+  "PostgreSQL-backed API authenticates, stores secrets in OpenBao and reads real metadata",
   { skip: !process.env.INTEGRATION },
   async () => {
     const database =
@@ -713,11 +713,13 @@ test(
       assert.equal(list.find((c) => c.id === id).password, undefined);
       const stored = (
         await pool.query(
-          "SELECT password_encrypted FROM metadata_connections WHERE id=$1",
+          "SELECT password_encrypted,secret_ref FROM metadata_connections WHERE id=$1",
           [id],
         )
       ).rows[0];
-      assert.ok(!stored.password_encrypted.includes(parsed.password));
+      assert.equal(stored.password_encrypted, null);
+      assert.equal(stored.secret_ref, "connections/" + id);
+      assert.equal(list.find((c) => c.id === id).secret_ref, undefined);
       assert.ok(
         (await request(`/api/connections/${id}/schemas`)).body.some(
           (s) => s.name === "fixture",

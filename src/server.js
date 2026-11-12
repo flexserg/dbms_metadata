@@ -3,6 +3,9 @@ import helmet from "helmet";
 import { rateLimit } from "express-rate-limit";
 import pg from "pg";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
+import { createSecretStore, migrateConnectionSecrets } from "./secrets.js";
+import { propertyDefinitions } from "./connection-options.js";
 import { vault, safeEqual } from "./security.js";
 import { validateConnection } from "./metadata.js";
 import { withTarget, overview, preview } from "./targets.js";
@@ -27,13 +30,28 @@ export async function createApp(config = process.env) {
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text NOT NULL, host text NOT NULL, port integer NOT NULL,
     database text NOT NULL, username text NOT NULL, ssl_mode text NOT NULL, password_encrypted text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now())`);
+  let secrets;
+  const secretConfig = { ...process.env, ...config };
   try {
     await initializeStorage(pool);
+    secrets = createSecretStore(secretConfig);
+    await secrets.check();
+    await migrateConnectionSecrets(pool, secrets, crypto, secretConfig);
   } catch (e) {
     await pool.end();
     throw e;
   }
-  const snapshots = snapshotService(pool, crypto);
+  const snapshots = snapshotService(pool, secrets);
+  const validateProfile = (input) =>
+    validateConnection({
+      ...input,
+      caCertificate:
+        input?.caCertificate ||
+        (input?.engine === "mssql"
+          ? secretConfig.MSSQL_TARGET_CA
+          : secretConfig.PG_TARGET_CA) ||
+        "",
+    });
   const app = express();
   app.disable("x-powered-by");
   if (config.TRUST_PROXY === "1") app.set("trust proxy", 1);
@@ -49,11 +67,12 @@ export async function createApp(config = process.env) {
       strictTransportSecurity: secureCookies ? undefined : false,
     }),
   );
-  app.use(express.json({ limit: "16kb" }));
+  app.use(express.json({ limit: "128kb" }));
   app.get("/health/live", (_req, res) => res.json({ status: "ok" }));
   app.get("/health/ready", async (_req, res) => {
     try {
       await pool.query("SELECT 1");
+      await secrets.check();
       res.json({ status: "ready" });
     } catch {
       res.status(503).json({ status: "unavailable" });
@@ -111,6 +130,9 @@ export async function createApp(config = process.env) {
     next();
   });
   app.get("/api/session", (_req, res) => res.json({ ok: true }));
+  app.get("/api/connection-options", (_req, res) =>
+    res.json(propertyDefinitions),
+  );
   app.post("/api/logout", (_req, res) =>
     res
       .clearCookie("session", { ...cookieOptions, maxAge: undefined })
@@ -120,7 +142,7 @@ export async function createApp(config = process.env) {
     res.json(
       (
         await pool.query(
-          `SELECT c.id,name,host,port,database,c.username,c.engine,ssl_mode AS "sslMode",created_at,refresh_interval_minutes,history_retention_days,
+          `SELECT c.id,name,label,host,port,database,c.username,c.engine,keep_alive AS "keepAlive",ssl_mode AS "sslMode",created_at,refresh_interval_minutes,history_retention_days,
             s.captured_at AS snapshot_at FROM metadata_connections c LEFT JOIN metadata_snapshots s ON s.connection_id=c.id ORDER BY name`,
         )
       ).rows,
@@ -129,7 +151,7 @@ export async function createApp(config = process.env) {
   app.post("/api/connections/test", async (req, res) => {
     let connection;
     try {
-      connection = validateConnection(req.body);
+      connection = validateProfile(req.body);
     } catch (e) {
       return res.status(400).json({ error: e.message });
     }
@@ -138,33 +160,65 @@ export async function createApp(config = process.env) {
   app.post("/api/connections", async (req, res) => {
     let c;
     try {
-      c = validateConnection(req.body);
+      c = validateProfile(req.body);
     } catch (e) {
       return res.status(400).json({ error: e.message });
     }
     await withTarget(c, overview);
-    const result = await pool.query(
-      `INSERT INTO metadata_connections(name,host,port,database,username,ssl_mode,password_encrypted,engine)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-      [
-        c.name,
-        c.host,
-        c.port,
-        c.database,
-        c.username,
-        c.sslMode,
-        crypto.seal(c.password),
-        c.engine,
-      ],
-    );
-    const job = snapshots.kick(
-      await snapshots.enqueue(result.rows[0].id, "initial"),
-    );
-    res.status(201).json({ ...result.rows[0], job });
+    const id = randomUUID(),
+      ref = "connections/" + id;
+    await secrets.write(ref, {
+      password: c.password,
+      caCertificate: c.caCertificate,
+      driverProperties: c.driverProperties,
+    });
+    let db, job;
+    try {
+      db = await pool.connect();
+      await db.query("BEGIN");
+      await db.query(
+        `INSERT INTO metadata_connections(id,name,label,host,port,database,username,ssl_mode,secret_ref,engine,keep_alive)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [
+          id,
+          c.name,
+          c.label,
+          c.host,
+          c.port,
+          c.database,
+          c.username,
+          c.sslMode,
+          ref,
+          c.engine,
+          c.keepAlive,
+        ],
+      );
+      job = (
+        await db.query(
+          "INSERT INTO metadata_refresh_jobs(connection_id,trigger) VALUES($1,'initial') RETURNING *",
+          [id],
+        )
+      ).rows[0];
+      await db.query("COMMIT");
+    } catch (error) {
+      if (db) await db.query("ROLLBACK");
+      await secrets.remove(ref).catch(() => {});
+      throw error;
+    } finally {
+      db?.release();
+    }
+    res.status(201).json({ id, job: snapshots.kick(job) });
   });
   app.delete("/api/connections/:id", async (req, res) => {
     if (!/^[a-f0-9-]{36}$/i.test(req.params.id))
       return res.status(400).json({ error: "Invalid connection ID" });
+    const profile = (
+      await pool.query(
+        "SELECT secret_ref FROM metadata_connections WHERE id=$1",
+        [req.params.id],
+      )
+    ).rows[0];
+    if (profile?.secret_ref) await secrets.remove(profile.secret_ref);
     await pool.query("DELETE FROM metadata_connections WHERE id=$1", [
       req.params.id,
     ]);
@@ -175,7 +229,7 @@ export async function createApp(config = process.env) {
       return res.status(400).json({ error: "Invalid connection ID" });
     const c = (
       await pool.query(
-        'SELECT *,ssl_mode AS "sslMode" FROM metadata_connections WHERE id=$1',
+        'SELECT *,ssl_mode AS "sslMode",keep_alive AS "keepAlive" FROM metadata_connections WHERE id=$1',
         [req.params.id],
       )
     ).rows[0];
@@ -313,8 +367,7 @@ export async function createApp(config = process.env) {
         return res.status(400).json({
           error: "Preview is limited to 1–100 rows and offset 0–100000",
         });
-      const c = req.profile;
-      c.password = crypto.open(c.password_encrypted);
+      const c = await secrets.resolve(req.profile);
       const data = await withTarget(c, (client) =>
         preview(client, String(req.query.oid), limit, offset),
       );
@@ -361,7 +414,7 @@ export async function createApp(config = process.env) {
           "Request failed. Check database connectivity, TLS configuration, and server logs.",
       });
   });
-  return { app, pool, snapshots };
+  return { app, pool, snapshots, secrets };
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { app, pool, snapshots } = await createApp();

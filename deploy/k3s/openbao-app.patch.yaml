@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metadata
+spec:
+  template:
+    spec:
+      serviceAccountName: metadata
+      containers:
+        - name: app
+          env:
+            - name: BAO_ADDR
+              value: https://openbao.dbms-metadata.svc:8200
+            - name: BAO_CA_FILE
+              value: /run/openbao/ca/ca.crt
+            - name: BAO_KV_MOUNT
+              value: secret
+            - name: BAO_KUBERNETES_ROLE
+              value: atlas
+            - name: BAO_KUBERNETES_JWT_FILE
+              value: /run/openbao/auth/token
+          volumeMounts:
+            - name: openbao-ca
+              mountPath: /run/openbao/ca
+              readOnly: true
+            - name: openbao-jwt
+              mountPath: /run/openbao/auth
+              readOnly: true
+      volumes:
+        - name: openbao-ca
+          configMap:
+            name: openbao-ca
+        - name: openbao-jwt
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: openbao
+                  expirationSeconds: 3600

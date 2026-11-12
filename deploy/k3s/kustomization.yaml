@@ -5,3 +5,6 @@ resources:
   - namespace.yaml
   - postgres.yaml
   - app.yaml
+  - openbao.yaml
+patches:
+  - path: openbao-app.patch.yaml
